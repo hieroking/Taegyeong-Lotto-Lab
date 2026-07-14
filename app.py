@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import cv2
+import numpy as np
+from rapidocr_onnxruntime import RapidOCR
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
@@ -35,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,7 @@ class MainWindow(QMainWindow):
         self.analyzer = LottoAnalyzer()
         self.photo_paths: list[str] = []
         self.recommendations: list[tuple[float, tuple[int, ...]]] = []
+        self.ocr_engine = None
 
         self.setWindowTitle(f"{APP_NAME} v{VERSION}")
         self.resize(1320, 850)
@@ -353,7 +357,7 @@ class MainWindow(QMainWindow):
 
         self.dashboard_info = QLabel(
             "역대 로또 당첨번호 Excel을 불러오면 분석이 시작됩니다.\n\n"
-            "사진은 파일로 등록하고, 사진에 적힌 번호는 직접 입력란에 붙여넣어 사용할 수 있습니다."
+            "사진을 추가하면 OCR로 숫자를 자동 인식하고, 오른쪽 입력란에 자동으로 추가합니다."
         )
         self.dashboard_info.setObjectName("card")
         self.dashboard_info.setAlignment(Qt.AlignCenter)
@@ -380,13 +384,16 @@ class MainWindow(QMainWindow):
         self.photo_list = QListWidget()
         ll.addWidget(self.photo_list)
         row = QHBoxLayout()
-        add = QPushButton("사진 추가")
+        add = QPushButton("사진 추가·자동 인식")
         add.clicked.connect(self.add_photos)
         delete = QPushButton("선택 삭제")
         delete.clicked.connect(self.delete_photo)
+        rerun = QPushButton("선택 사진 다시 인식")
+        rerun.clicked.connect(self.rerun_selected_photo_ocr)
         row.addWidget(add)
         row.addWidget(delete)
         ll.addLayout(row)
+        ll.addWidget(rerun)
 
         right = QFrame()
         right.setObjectName("card")
@@ -528,15 +535,124 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
 
+    def _get_ocr_engine(self):
+        if self.ocr_engine is None:
+            self.statusBar().showMessage("OCR 엔진을 처음 준비하는 중입니다...")
+            QApplication.processEvents()
+            self.ocr_engine = RapidOCR()
+        return self.ocr_engine
+
+    @staticmethod
+    def _numbers_from_ocr_text(texts: list[str]) -> list[int]:
+        numbers: list[int] = []
+        for text in texts:
+            # 시간(예: 6:08), 날짜, 페이지(1/6) 등은 최대한 제외
+            if re.search(r"\d{1,2}:\d{2}", text):
+                text = re.sub(r"\d{1,2}:\d{2}", " ", text)
+            if re.search(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", text):
+                text = re.sub(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", " ", text)
+            text = re.sub(r"\b\d+\s*/\s*\d+\b", " ", text)
+
+            for token in re.findall(r"(?<!\d)\d{1,2}(?!\d)", text):
+                value = int(token)
+                if 1 <= value <= 45:
+                    numbers.append(value)
+        return numbers
+
+    def extract_numbers_from_photo(self, path: str) -> list[int]:
+        image = cv2.imread(path)
+        if image is None:
+            raise ValueError("사진 파일을 열 수 없습니다.")
+
+        # 휴대폰 상태표시줄과 하단 내비게이션 영역을 제외해 오인식을 줄임
+        height, width = image.shape[:2]
+        top = int(height * 0.09)
+        bottom = int(height * 0.93)
+        cropped = image[top:bottom, 0:width]
+
+        # 글자 대비 강화
+        gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+        gray = cv2.convertScaleAbs(gray, alpha=1.35, beta=8)
+
+        engine = self._get_ocr_engine()
+        result, _ = engine(gray)
+
+        texts: list[str] = []
+        if result:
+            for item in result:
+                if len(item) >= 2:
+                    texts.append(str(item[1]))
+
+        return self._numbers_from_ocr_text(texts)
+
+    def append_ocr_numbers(self, numbers: list[int]) -> None:
+        if not numbers:
+            return
+        current = self.source_input.toPlainText().rstrip()
+        line = " ".join(map(str, numbers))
+        self.source_input.setPlainText((current + "\n" + line).strip())
+        self.update_source_counts()
+
     def add_photos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "번호 사진 선택", "",
             "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
         )
+        if not paths:
+            return
+
+        all_numbers: list[int] = []
+        failed: list[str] = []
+
         for path in paths:
             if path not in self.photo_paths:
                 self.photo_paths.append(path)
                 self.photo_list.addItem(Path(path).name)
+
+            try:
+                self.statusBar().showMessage(f"OCR 인식 중: {Path(path).name}")
+                QApplication.processEvents()
+                all_numbers.extend(self.extract_numbers_from_photo(path))
+            except Exception:
+                failed.append(Path(path).name)
+
+        if all_numbers:
+            self.append_ocr_numbers(all_numbers)
+            self.statusBar().showMessage(
+                f"사진 {len(paths)}장 OCR 완료 — 숫자 {len(all_numbers)}개 인식"
+            )
+        else:
+            self.statusBar().showMessage("사진에서 1~45 숫자를 찾지 못했습니다.")
+
+        message = (
+            f"사진 {len(paths)}장 처리 완료\n"
+            f"인식된 숫자: {len(all_numbers)}개"
+        )
+        if failed:
+            message += "\n인식 실패: " + ", ".join(failed)
+        QMessageBox.information(self, "사진 OCR 결과", message)
+
+    def rerun_selected_photo_ocr(self) -> None:
+        row = self.photo_list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "사진 선택", "다시 인식할 사진을 선택하세요.")
+            return
+        path = self.photo_paths[row]
+        try:
+            numbers = self.extract_numbers_from_photo(path)
+            if numbers:
+                self.append_ocr_numbers(numbers)
+                QMessageBox.information(
+                    self,
+                    "OCR 완료",
+                    f"{Path(path).name}\n숫자 {len(numbers)}개를 입력란에 추가했습니다."
+                )
+            else:
+                QMessageBox.information(
+                    self, "OCR 결과", "사진에서 1~45 숫자를 찾지 못했습니다."
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "OCR 오류", str(exc))
 
     def delete_photo(self) -> None:
         row = self.photo_list.currentRow()
