@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 
 
@@ -242,6 +242,7 @@ class Recommender:
         "동반수": "pair",
         "트리플": "triple",
         "최근패턴": "recent",
+        "자체추천": "self",
     }
 
     def __init__(self, analyzer: LottoAnalyzer) -> None:
@@ -332,8 +333,103 @@ class Recommender:
         key = self.CATEGORY_NAMES.get(category, "composite")
         if key == "composite":
             return metrics["composite"]
+        if key == "self":
+            return metrics.get("self", metrics["composite"])
         # 항목별 순위는 해당 항목 70% + 자동 종합 30%
         return metrics[key] * 0.70 + metrics["composite"] * 0.30
+
+    def self_number_scores(self) -> dict[int, float]:
+        """역대 전체 데이터만으로 1~45 번호별 자체 점수를 계산합니다."""
+        max_all = max(self.a.number_counts.values(), default=1)
+        max_recent = max(self.a.recent_number_counts.values(), default=1)
+
+        # 번호별 동반수 중심성: 다른 번호들과 같이 나온 횟수의 합
+        pair_centrality = {}
+        for number in range(1, 46):
+            total = 0
+            for other in range(1, 46):
+                if number == other:
+                    continue
+                pair = tuple(sorted((number, other)))
+                total += self.a.pair_counts[pair]
+            pair_centrality[number] = total
+        max_centrality = max(pair_centrality.values(), default=1)
+
+        # 최신 출현 회차와 지연 정도
+        latest_round = self.a.draws[-1].round_no if self.a.draws else 0
+        last_seen = {n: 0 for n in range(1, 46)}
+        for draw in self.a.draws:
+            for n in draw.numbers:
+                last_seen[n] = draw.round_no
+        max_delay = max((latest_round - last_seen[n] for n in range(1, 46)), default=1)
+
+        scores = {}
+        for n in range(1, 46):
+            all_score = self.a.number_counts[n] / max_all * 100
+            recent_score = self.a.recent_number_counts[n] / max_recent * 100
+            central_score = pair_centrality[n] / max_centrality * 100
+            delay = latest_round - last_seen[n]
+            delay_score = delay / max(1, max_delay) * 100
+
+            scores[n] = (
+                all_score * 0.35
+                + recent_score * 0.30
+                + central_score * 0.20
+                + delay_score * 0.15
+            )
+        return scores
+
+    def generate_self(
+        self,
+        count: int = 100,
+    ) -> list[tuple[float, tuple[int, ...], dict[str, float]]]:
+        """사진·직접입력 없이 역대 전체 당첨번호만으로 추천합니다."""
+        number_scores = self.self_number_scores()
+
+        # 45개 전체 조합(약 814만 개)은 느리므로 자체 점수 상위 28개를 우선 탐색합니다.
+        # 구간 다양성을 위해 각 10번대 구간의 강한 번호도 포함합니다.
+        ranked = sorted(number_scores, key=lambda n: (-number_scores[n], n))
+        pool = set(ranked[:24])
+        for low, high in [(1, 10), (11, 20), (21, 30), (31, 40), (41, 45)]:
+            zone = [n for n in ranked if low <= n <= high][:2]
+            pool.update(zone)
+
+        # 최대 28개로 제한
+        pool = sorted(pool, key=lambda n: (-number_scores[n], n))[:28]
+        pool = sorted(pool)
+
+        # metrics()의 나온횟수 점수를 역대 출현빈도로 계산하기 위한 가중치
+        historical_weights = Counter({
+            n: max(1, self.a.number_counts[n])
+            for n in range(1, 46)
+        })
+
+        candidates = []
+        for combo in combinations(pool, 6):
+            total = sum(combo)
+            if not 20 <= total <= 300:
+                continue
+
+            odd = sum(n % 2 for n in combo)
+            high = sum(n >= 23 for n in combo)
+            if odd not in (2, 3, 4) or high not in (2, 3, 4):
+                continue
+            if self.consecutive_pairs(combo) > 2:
+                continue
+            if combo in self.a.first_prize or combo in self.a.second_prize:
+                continue
+
+            metrics = self.metrics(combo, historical_weights)
+            own_number_score = sum(number_scores[n] for n in combo) / 6.0
+
+            # 자체추천 최종 점수: 번호 자체점수와 조합 통계의 자동 종합
+            self_score = own_number_score * 0.45 + metrics["composite"] * 0.55
+            metrics = dict(metrics)
+            metrics["self"] = self_score
+            candidates.append((self_score, combo, metrics))
+
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        return candidates[:count]
 
     def generate(
         self,
@@ -421,7 +517,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(sub)
         lay.addSpacing(20)
 
-        names = ["번호 입력", "추천조합", "나온횟수", "동반수", "트리플", "최근패턴"]
+        names = ["번호 입력", "추천조합", "나온횟수", "동반수", "트리플", "최근패턴", "자체추천"]
         for i, name in enumerate(names):
             b = QPushButton(name)
             if i == 0:
@@ -552,7 +648,7 @@ class MainWindow(QMainWindow):
 
         guide = QLabel(
             "사진 또는 직접 입력한 번호를 기준으로 자동 계산합니다.\n"
-            "추천 100조합 · 번호합계 20~300 · 역대 1등·2등 동일 조합 제외"
+            "추천 100조합 · 번호합계 20~300 · 역대 1등·2등 동일 조합 제외\n자체추천은 사진이나 직접입력 없이 역대 전체 당첨번호만으로 계산합니다."
         )
         guide.setObjectName("card")
         guide.setWordWrap(True)
@@ -560,7 +656,7 @@ class MainWindow(QMainWindow):
 
         self.rec_category = QComboBox()
         self.rec_category.addItems(
-            ["추천조합", "나온횟수", "동반수", "트리플", "최근패턴"]
+            ["추천조합", "나온횟수", "동반수", "트리플", "최근패턴", "자체추천"]
         )
         self.rec_category.currentTextChanged.connect(self.generate_recommendations)
         lay.addWidget(self.rec_category)
@@ -800,17 +896,21 @@ class MainWindow(QMainWindow):
         if not self.analyzer.draws:
             return
         try:
-            weights = self.source_weights()
             recommender = Recommender(self.analyzer)
             category = self.rec_category.currentText()
-            self.recommendations = recommender.generate(
-                weights,
-                100,
-                20,
-                300,
-                True,
-                category,
-            )
+
+            if category == "자체추천":
+                self.recommendations = recommender.generate_self(100)
+            else:
+                weights = self.source_weights()
+                self.recommendations = recommender.generate(
+                    weights,
+                    100,
+                    20,
+                    300,
+                    True,
+                    category,
+                )
             if not self.recommendations:
                 QMessageBox.information(
                     self, "결과 없음",
@@ -845,9 +945,9 @@ class MainWindow(QMainWindow):
                 # 현재 선택한 카테고리의 점수 칸을 강조
                 metric_column = {
                     "composite": 3, "input": 4, "pair": 5,
-                    "triple": 6, "recent": 7,
+                    "triple": 6, "recent": 7, "self": 2,
                 }[selected_key]
-                metric_value = metrics[selected_key]
+                metric_value = metrics.get(selected_key, score)
                 item = self.rec_table.item(r - 1, metric_column)
                 if metric_value >= 70:
                     color = QColor("#2E7D32")
@@ -902,6 +1002,7 @@ class MainWindow(QMainWindow):
                 "동반수점수": round(metrics["pair"], 1),
                 "트리플점수": round(metrics["triple"], 1),
                 "최근패턴점수": round(metrics["recent"], 1),
+                "자체추천점수": round(metrics.get("self", 0.0), 1),
                 "같이잘나온수": ", ".join(
                     f"{a}-{b}({count}회)"
                     for (a, b), count in recommender.pair_details(combo, 3)
