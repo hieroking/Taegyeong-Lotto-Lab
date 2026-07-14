@@ -6,7 +6,7 @@ on:
       version:
         description: "Release 버전 (예: v0.2.0)"
         required: true
-        default: "v0.2.0"
+        default: "v0.2.1"
   push:
     branches: [main]
     paths:
@@ -45,7 +45,7 @@ jobs:
             app.py
       - uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows-v0.2
+          name: TaegyeongLottoLab-Windows-v0.2.1
           path: dist/TaegyeongLottoLab.exe
           if-no-files-found: error
           retention-days: 30

@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 
 @dataclass(frozen=True)
@@ -86,12 +86,12 @@ class LottoAnalyzer:
 
     @staticmethod
     def _parse_sheet(df: pd.DataFrame) -> list[Draw]:
+        """엑셀 시트에서 회차·당첨번호 6개·보너스를 안전하게 추출합니다."""
         if df.empty or df.shape[1] < 7:
             return []
 
-        # 사용자가 올린 원본 형식: 회차, 추첨일, 첫번째~여섯번째, 보너스
         header_row = None
-        for i in range(min(20, len(df))):
+        for i in range(min(30, len(df))):
             texts = [str(v).strip().lower() for v in df.iloc[i].tolist()]
             if any("회차" in x or x == "round" for x in texts):
                 header_row = i
@@ -100,63 +100,85 @@ class LottoAnalyzer:
         if header_row is None:
             return []
 
-        headers = [str(v).strip() for v in df.iloc[header_row].tolist()]
-        body = df.iloc[header_row + 1:].copy()
-        body.columns = headers
+        headers = [
+            "" if pd.isna(v) else str(v).strip()
+            for v in df.iloc[header_row].tolist()
+        ]
+        body = df.iloc[header_row + 1:].reset_index(drop=True)
 
-        round_col = next((c for c in headers if "회차" in c.lower() or c.lower() == "round"), None)
-        bonus_col = next((c for c in headers if "보너스" in c.lower() or "bonus" in c.lower()), None)
+        def find_index(predicate) -> int | None:
+            for idx, header in enumerate(headers):
+                if predicate(header):
+                    return idx
+            return None
 
-        if round_col is None:
+        round_idx = find_index(
+            lambda h: "회차" in h.lower() or h.lower() == "round"
+        )
+        bonus_idx = find_index(
+            lambda h: "보너스" in h.lower() or "bonus" in h.lower()
+        )
+
+        if round_idx is None:
             return []
 
-        # 당첨 번호 후보를 우선적으로 헤더명으로 찾음
-        order_words = ("첫", "두", "세", "네", "다섯", "여섯")
-        num_cols = [c for c in headers if any(w in c for w in order_words)]
+        order_words = ("첫번째", "두번째", "세번째", "네번째", "다섯번째", "여섯번째")
+        number_indices: list[int] = []
+        for word in order_words:
+            idx = find_index(lambda h, w=word: w in h)
+            if idx is not None:
+                number_indices.append(idx)
 
-        # 일반적인 번호1~번호6 형식도 지원
-        if len(num_cols) < 6:
-            num_cols = [
-                c for c in headers
-                if re.search(r"(번호|num|ball)\s*[1-6]$", c, re.I)
-                and c != bonus_col
-            ]
+        if len(number_indices) < 6:
+            number_indices = []
+            for n in range(1, 7):
+                idx = find_index(
+                    lambda h, n=n: bool(
+                        re.search(rf"(번호|num|ball)\s*{n}$", h, re.I)
+                    )
+                )
+                if idx is not None:
+                    number_indices.append(idx)
 
-        # 그래도 못 찾으면 회차 뒤쪽 숫자 컬럼 중 1~45 비율이 높은 6개 선택
-        if len(num_cols) < 6:
-            candidates = []
-            for c in headers:
-                if c in (round_col, bonus_col):
+        if len(number_indices) < 6:
+            candidates: list[int] = []
+            for idx in range(df.shape[1]):
+                if idx in (round_idx, bonus_idx):
                     continue
-                s = pd.to_numeric(body[c], errors="coerce").dropna()
-                if len(s) >= 10 and s.between(1, 45).mean() >= 0.85:
-                    candidates.append(c)
-            num_cols = candidates[:6]
+                series = pd.to_numeric(body.iloc[:, idx], errors="coerce").dropna()
+                if len(series) >= 10 and float(series.between(1, 45).mean()) >= 0.85:
+                    candidates.append(idx)
+            number_indices = candidates[:6]
 
-        if len(num_cols) < 6:
+        if len(number_indices) < 6:
             return []
 
         draws: list[Draw] = []
         for _, row in body.iterrows():
             try:
-                round_no = int(float(row[round_col]))
-                nums = tuple(sorted(int(float(row[c])) for c in num_cols[:6]))
-            except (ValueError, TypeError):
+                round_no = int(float(row.iloc[round_idx]))
+                nums = tuple(
+                    sorted(int(float(row.iloc[idx])) for idx in number_indices[:6])
+                )
+            except (ValueError, TypeError, IndexError):
                 continue
 
             if len(set(nums)) != 6 or not all(1 <= x <= 45 for x in nums):
                 continue
 
             bonus = None
-            if bonus_col and pd.notna(row.get(bonus_col)):
+            if bonus_idx is not None:
                 try:
-                    b = int(float(row[bonus_col]))
-                    if 1 <= b <= 45:
-                        bonus = b
-                except (ValueError, TypeError):
-                    pass
+                    bonus_value = row.iloc[bonus_idx]
+                    if pd.notna(bonus_value):
+                        candidate = int(float(bonus_value))
+                        if 1 <= candidate <= 45:
+                            bonus = candidate
+                except (ValueError, TypeError, IndexError):
+                    bonus = None
 
             draws.append(Draw(round_no, nums, bonus))
+
         return draws
 
     def _analyze(self) -> None:
