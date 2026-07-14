@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 import re
 import sys
+import json
+import subprocess
 import traceback
 from collections import Counter
 from dataclasses import dataclass
@@ -25,9 +27,6 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-import cv2
-import numpy as np
-from rapidocr_onnxruntime import RapidOCR
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
@@ -38,7 +37,22 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "1.0.1"
+VERSION = "2.0.0"
+
+
+def resource_path(name: str) -> Path:
+    """PyInstaller 실행 폴더와 소스 실행 환경 모두에서 리소스 파일 경로를 찾습니다."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    candidate = base / name
+    if candidate.exists():
+        return candidate
+
+    exe_dir = Path(sys.executable).resolve().parent
+    candidate = exe_dir / name
+    if candidate.exists():
+        return candidate
+
+    return Path(__file__).resolve().parent / name
 
 
 @dataclass(frozen=True)
@@ -278,7 +292,6 @@ class MainWindow(QMainWindow):
         self.analyzer = LottoAnalyzer()
         self.photo_paths: list[str] = []
         self.recommendations: list[tuple[float, tuple[int, ...]]] = []
-        self.ocr_engine = None
 
         self.setWindowTitle(f"{APP_NAME} v{VERSION}")
         self.resize(1320, 850)
@@ -357,7 +370,7 @@ class MainWindow(QMainWindow):
 
         self.dashboard_info = QLabel(
             "역대 로또 당첨번호 Excel을 불러오면 분석이 시작됩니다.\n\n"
-            "사진을 추가하면 OCR로 숫자를 자동 인식하고, 오른쪽 입력란에 자동으로 추가합니다."
+            "사진을 추가하면 Windows 내장 OCR로 번호를 자동 인식하고 입력란에 추가합니다."
         )
         self.dashboard_info.setObjectName("card")
         self.dashboard_info.setAlignment(Qt.AlignCenter)
@@ -399,7 +412,7 @@ class MainWindow(QMainWindow):
         right.setObjectName("card")
         rl = QVBoxLayout(right)
         rl.addWidget(QLabel(
-            "사진에서 인식된 번호가 자동으로 들어옵니다.\n"
+            "사진 또는 메모에 나온 번호를 그대로 입력하세요.\n"
             "같은 번호가 반복되면 출현횟수 가중치로 반영됩니다."
         ))
         self.source_input = QPlainTextEdit()
@@ -535,81 +548,56 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
 
-    def _get_ocr_engine(self):
-        if self.ocr_engine is None:
-            self.statusBar().showMessage("OCR 엔진을 처음 준비하는 중입니다...")
-            QApplication.processEvents()
-            try:
-                self.ocr_engine = RapidOCR()
-            except Exception as exc:
-                raise RuntimeError(
-                    "OCR 엔진 초기화에 실패했습니다. "
-                    "EXE에 OCR 모델·설정 파일이 포함되지 않았을 수 있습니다.\n"
-                    f"상세 오류: {exc}"
-                ) from exc
-        return self.ocr_engine
+    def run_windows_ocr(self, image_path: str) -> list[int]:
+        """Windows 10/11 내장 OCR을 PowerShell로 호출합니다."""
+        script = resource_path("windows_ocr.ps1")
+        if not script.exists():
+            raise FileNotFoundError("windows_ocr.ps1 파일이 프로그램 폴더에 없습니다.")
 
-    @staticmethod
-    def _numbers_from_ocr_text(texts: list[str]) -> list[int]:
-        numbers: list[int] = []
-        for text in texts:
-            # 시간(예: 6:08), 날짜, 페이지(1/6) 등은 최대한 제외
-            if re.search(r"\d{1,2}:\d{2}", text):
-                text = re.sub(r"\d{1,2}:\d{2}", " ", text)
-            if re.search(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", text):
-                text = re.sub(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", " ", text)
-            text = re.sub(r"\b\d+\s*/\s*\d+\b", " ", text)
-            text = re.sub(r"\b(96|100)\b", " ", text)  # 배터리 표시 오인식 방지
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", str(script),
+            "-ImagePath", image_path,
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
 
-            for token in re.findall(r"(?<!\d)\d{1,2}(?!\d)", text):
-                value = int(token)
-                if 1 <= value <= 45:
-                    numbers.append(value)
-        return numbers
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
 
-    def extract_numbers_from_photo(self, path: str) -> list[int]:
-        # Windows의 한글·공백·긴 경로에서도 안전하게 사진을 읽습니다.
+        if completed.returncode != 0:
+            detail = stderr or stdout or "알 수 없는 Windows OCR 오류"
+            raise RuntimeError(detail)
+
         try:
-            file_bytes = np.fromfile(path, dtype=np.uint8)
-            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        except Exception as exc:
-            raise ValueError(f"사진 파일을 열 수 없습니다: {exc}") from exc
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Windows OCR 결과를 해석하지 못했습니다.\n"
+                f"출력: {stdout[:500]}"
+            ) from exc
 
-        if image is None:
-            raise ValueError(
-                "사진 파일을 열 수 없습니다. 파일이 손상되었거나 지원하지 않는 형식일 수 있습니다."
-            )
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("error", "Windows OCR 처리 실패"))
 
-        # 휴대폰 상태표시줄과 하단 내비게이션 영역을 제외해 오인식을 줄임
-        height, width = image.shape[:2]
-        top = int(height * 0.09)
-        bottom = int(height * 0.93)
-        cropped = image[top:bottom, 0:width]
-
-        # 글자 대비 강화
-        gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-        gray = cv2.convertScaleAbs(gray, alpha=1.35, beta=8)
-
-        engine = self._get_ocr_engine()
-        try:
-            result, _ = engine(gray)
-        except Exception as exc:
-            raise ValueError(f"OCR 처리 중 오류가 발생했습니다: {exc}") from exc
-
-        texts: list[str] = []
-        if result:
-            for item in result:
-                if len(item) >= 2:
-                    texts.append(str(item[1]))
-
-        return self._numbers_from_ocr_text(texts)
+        numbers = payload.get("numbers", [])
+        return [int(n) for n in numbers if 1 <= int(n) <= 45]
 
     def append_ocr_numbers(self, numbers: list[int]) -> None:
         if not numbers:
             return
         current = self.source_input.toPlainText().rstrip()
-        line = " ".join(map(str, numbers))
-        self.source_input.setPlainText((current + "\n" + line).strip())
+        added = " ".join(map(str, numbers))
+        self.source_input.setPlainText((current + "\n" + added).strip())
         self.update_source_counts()
 
     def add_photos(self) -> None:
@@ -621,7 +609,7 @@ class MainWindow(QMainWindow):
             return
 
         all_numbers: list[int] = []
-        failed: list[str] = []
+        failures: list[str] = []
 
         for path in paths:
             if path not in self.photo_paths:
@@ -629,16 +617,16 @@ class MainWindow(QMainWindow):
                 self.photo_list.addItem(Path(path).name)
 
             try:
-                self.statusBar().showMessage(f"OCR 인식 중: {Path(path).name}")
+                self.statusBar().showMessage(f"Windows OCR 인식 중: {Path(path).name}")
                 QApplication.processEvents()
-                all_numbers.extend(self.extract_numbers_from_photo(path))
-            except Exception:
-                failed.append(Path(path).name)
+                all_numbers.extend(self.run_windows_ocr(path))
+            except Exception as exc:
+                failures.append(f"{Path(path).name}: {exc}")
 
         if all_numbers:
             self.append_ocr_numbers(all_numbers)
             self.statusBar().showMessage(
-                f"사진 {len(paths)}장 OCR 완료 — 숫자 {len(all_numbers)}개 인식"
+                f"사진 {len(paths)}장 처리 완료 — 숫자 {len(all_numbers)}개 인식"
             )
         else:
             self.statusBar().showMessage("사진에서 1~45 숫자를 찾지 못했습니다.")
@@ -647,8 +635,8 @@ class MainWindow(QMainWindow):
             f"사진 {len(paths)}장 처리 완료\n"
             f"인식된 숫자: {len(all_numbers)}개"
         )
-        if failed:
-            message += "\n인식 실패: " + ", ".join(failed)
+        if failures:
+            message += "\n\n일부 오류:\n" + "\n".join(failures[:5])
         QMessageBox.information(self, "사진 OCR 결과", message)
 
     def rerun_selected_photo_ocr(self) -> None:
@@ -656,9 +644,10 @@ class MainWindow(QMainWindow):
         if row < 0:
             QMessageBox.information(self, "사진 선택", "다시 인식할 사진을 선택하세요.")
             return
+
         path = self.photo_paths[row]
         try:
-            numbers = self.extract_numbers_from_photo(path)
+            numbers = self.run_windows_ocr(path)
             if numbers:
                 self.append_ocr_numbers(numbers)
                 QMessageBox.information(
@@ -668,7 +657,9 @@ class MainWindow(QMainWindow):
                 )
             else:
                 QMessageBox.information(
-                    self, "OCR 결과", "사진에서 1~45 숫자를 찾지 못했습니다."
+                    self,
+                    "OCR 결과",
+                    "사진에서 1~45 숫자를 찾지 못했습니다."
                 )
         except Exception as exc:
             QMessageBox.warning(self, "OCR 오류", str(exc))

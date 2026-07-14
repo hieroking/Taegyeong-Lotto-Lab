@@ -6,12 +6,13 @@ on:
       version:
         description: "Release 버전"
         required: true
-        default: "v1.0.0"
+        default: "v2.0.0"
   push:
     branches: [main]
     paths:
       - "app.py"
       - "requirements.txt"
+      - "windows_ocr.ps1"
       - ".github/workflows/windows-release.yml"
 
 permissions:
@@ -22,11 +23,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: 저장소 파일 받기
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Python 설치
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
@@ -37,46 +36,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: OCR 패키지 위치 확인
-        id: rapidocr
+      - name: Windows 프로그램 생성
         shell: pwsh
         run: |
-          $pkg = python -c "import rapidocr_onnxruntime, pathlib; print(pathlib.Path(rapidocr_onnxruntime.__file__).resolve().parent)"
-          "pkg=$pkg" >> $env:GITHUB_OUTPUT
-          Write-Host "RapidOCR package: $pkg"
-          Get-ChildItem -Recurse $pkg | Select-Object FullName
-
-      - name: Windows EXE 생성
-        shell: pwsh
-        run: |
-          $rapid = "${{ steps.rapidocr.outputs.pkg }}"
           pyinstaller `
             --noconfirm `
             --clean `
             --windowed `
-            --onefile `
+            --onedir `
             --name "TaegyeongLottoLab" `
             --collect-all PySide6 `
             --collect-all pandas `
-            --collect-all onnxruntime `
-            --collect-all cv2 `
             --hidden-import openpyxl `
-            --add-data "$rapid;rapidocr_onnxruntime" `
+            --add-data "windows_ocr.ps1;." `
             app.py
 
-      - name: EXE 결과 확인
+      - name: 필수 파일 확인
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/TaegyeongLottoLab.exe")) {
+          if (!(Test-Path "dist/TaegyeongLottoLab/TaegyeongLottoLab.exe")) {
             throw "EXE 생성 실패"
           }
-          Get-Item "dist/TaegyeongLottoLab.exe" | Format-List Name,Length,FullName
+          if (!(Test-Path "dist/TaegyeongLottoLab/_internal/windows_ocr.ps1") -and
+              !(Test-Path "dist/TaegyeongLottoLab/windows_ocr.ps1")) {
+            throw "windows_ocr.ps1 누락"
+          }
 
-      - name: EXE 다운로드 파일 등록
-        uses: actions/upload-artifact@v4
+      - name: 배포 ZIP 생성
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "dist/TaegyeongLottoLab/*" `
+            -DestinationPath "TaegyeongLottoLab-Windows-v2.0.0.zip" `
+            -Force
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows-v1.0
-          path: dist/TaegyeongLottoLab.exe
+          name: TaegyeongLottoLab-Windows-v2.0.0
+          path: TaegyeongLottoLab-Windows-v2.0.0.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -89,9 +86,11 @@ jobs:
         run: |
           gh release view "$env:RELEASE_VERSION" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" --clobber
+            gh release upload "$env:RELEASE_VERSION" `
+              "TaegyeongLottoLab-Windows-v2.0.0.zip" --clobber
           } else {
-            gh release create "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" `
+            gh release create "$env:RELEASE_VERSION" `
+              "TaegyeongLottoLab-Windows-v2.0.0.zip" `
               --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
-              --notes "v1.0: Excel 분석, 사진 OCR, 번호 집계, 추천 조합, 1등·2등 제외, 조합 검사."
+              --notes "Windows 내장 OCR 기반 안정화 버전."
           }
