@@ -18,6 +18,8 @@ import math
 import re
 import sys
 import json
+import base64
+import os
 import subprocess
 import traceback
 from collections import Counter
@@ -37,22 +39,11 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 
 
-def resource_path(name: str) -> Path:
-    """PyInstaller 실행 폴더와 소스 실행 환경 모두에서 리소스 파일 경로를 찾습니다."""
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    candidate = base / name
-    if candidate.exists():
-        return candidate
 
-    exe_dir = Path(sys.executable).resolve().parent
-    candidate = exe_dir / name
-    if candidate.exists():
-        return candidate
-
-    return Path(__file__).resolve().parent / name
+WINDOWS_OCR_PS = '$ErrorActionPreference = "Stop"\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\nfunction Await($AsyncOperation, [Type]$ResultType) {\n    $methods = [System.WindowsRuntimeSystemExtensions].GetMethods() |\n        Where-Object {\n            $_.Name -eq "AsTask" -and\n            $_.IsGenericMethod -and\n            $_.GetParameters().Count -eq 1\n        }\n    $method = $methods | Select-Object -First 1\n    if ($null -eq $method) {\n        throw "Windows Runtime AsTask 메서드를 찾지 못했습니다."\n    }\n    $generic = $method.MakeGenericMethod($ResultType)\n    $task = $generic.Invoke($null, @($AsyncOperation))\n    $task.Wait()\n    return $task.Result\n}\n\ntry {\n    Add-Type -AssemblyName System.Runtime.WindowsRuntime\n\n    $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]\n    $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]\n    $null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]\n\n    $imagePath = $env:LOTTO_OCR_IMAGE\n    if ([string]::IsNullOrWhiteSpace($imagePath)) {\n        throw "사진 경로가 전달되지 않았습니다."\n    }\n    if (!(Test-Path -LiteralPath $imagePath)) {\n        throw "사진 파일을 찾을 수 없습니다: $imagePath"\n    }\n\n    $fullPath = [System.IO.Path]::GetFullPath($imagePath)\n    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($fullPath)) ([Windows.Storage.StorageFile])\n    $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\n    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\n    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\n\n    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()\n    if ($null -eq $engine) {\n        throw "Windows OCR 엔진을 만들 수 없습니다. Windows 설정에서 한국어 OCR 언어 기능을 설치하세요."\n    }\n\n    $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])\n    $text = $result.Text\n\n    # 휴대폰 캡처에서 자주 섞이는 시간/날짜/페이지 표시 제거\n    $clean = [regex]::Replace($text, \'\\b\\d{1,2}:\\d{2}\\b\', \' \')\n    $clean = [regex]::Replace($clean, \'\\b\\d{4}[./-]\\d{1,2}[./-]\\d{1,2}\\b\', \' \')\n    $clean = [regex]::Replace($clean, \'\\b\\d+\\s*/\\s*\\d+\\b\', \' \')\n\n    $numbers = @()\n    foreach ($m in [regex]::Matches($clean, \'(?<!\\d)\\d{1,2}(?!\\d)\')) {\n        $n = [int]$m.Value\n        if ($n -ge 1 -and $n -le 45) {\n            $numbers += $n\n        }\n    }\n\n    @{ ok = $true; text = $text; numbers = $numbers } |\n        ConvertTo-Json -Compress -Depth 4\n    exit 0\n}\ncatch {\n    @{ ok = $false; error = $_.Exception.Message; numbers = @() } |\n        ConvertTo-Json -Compress -Depth 4\n    exit 1\n}'
 
 
 @dataclass(frozen=True)
@@ -370,7 +361,7 @@ class MainWindow(QMainWindow):
 
         self.dashboard_info = QLabel(
             "역대 로또 당첨번호 Excel을 불러오면 분석이 시작됩니다.\n\n"
-            "사진을 추가하면 Windows 내장 OCR로 번호를 자동 인식하고 입력란에 추가합니다."
+            "사진을 추가하면 별도 OCR 파일 없이 Windows 내장 OCR로 번호를 자동 인식합니다."
         )
         self.dashboard_info.setObjectName("card")
         self.dashboard_info.setAlignment(Qt.AlignCenter)
@@ -549,47 +540,64 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
 
     def run_windows_ocr(self, image_path: str) -> list[int]:
-        """Windows 10/11 내장 OCR을 PowerShell로 호출합니다."""
-        script = resource_path("windows_ocr.ps1")
-        if not script.exists():
-            raise FileNotFoundError("windows_ocr.ps1 파일이 프로그램 폴더에 없습니다.")
+        """외부 파일 없이 Windows 10/11 내장 OCR을 호출합니다."""
+        if sys.platform != "win32":
+            raise RuntimeError("사진 OCR은 Windows 10/11에서만 사용할 수 있습니다.")
+
+        encoded = base64.b64encode(
+            WINDOWS_OCR_PS.encode("utf-16le")
+        ).decode("ascii")
+
+        env = os.environ.copy()
+        env["LOTTO_OCR_IMAGE"] = str(Path(image_path).resolve())
 
         command = [
             "powershell.exe",
+            "-NoLogo",
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy", "Bypass",
-            "-File", str(script),
-            "-ImagePath", image_path,
+            "-EncodedCommand", encoded,
         ]
+
         completed = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            encoding="utf-8-sig",
             errors="replace",
-            timeout=90,
+            timeout=120,
+            env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
 
-        if completed.returncode != 0:
-            detail = stderr or stdout or "알 수 없는 Windows OCR 오류"
-            raise RuntimeError(detail)
+        # PowerShell이 JSON 앞에 공백/경고를 붙인 경우 마지막 JSON 객체를 찾음
+        json_line = ""
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                json_line = line
+                break
+
+        if not json_line:
+            detail = stderr or stdout or "Windows OCR에서 결과를 받지 못했습니다."
+            raise RuntimeError(detail[:1000])
 
         try:
-            payload = json.loads(stdout)
+            payload = json.loads(json_line)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 "Windows OCR 결과를 해석하지 못했습니다.\n"
-                f"출력: {stdout[:500]}"
+                f"출력: {json_line[:500]}"
             ) from exc
 
         if not payload.get("ok"):
             raise RuntimeError(payload.get("error", "Windows OCR 처리 실패"))
 
-        numbers = payload.get("numbers", [])
+        numbers = payload.get("numbers") or []
         return [int(n) for n in numbers if 1 <= int(n) <= 45]
 
     def append_ocr_numbers(self, numbers: list[int]) -> None:
@@ -617,7 +625,7 @@ class MainWindow(QMainWindow):
                 self.photo_list.addItem(Path(path).name)
 
             try:
-                self.statusBar().showMessage(f"Windows OCR 인식 중: {Path(path).name}")
+                self.statusBar().showMessage(f"내장 OCR 인식 중: {Path(path).name}")
                 QApplication.processEvents()
                 all_numbers.extend(self.run_windows_ocr(path))
             except Exception as exc:

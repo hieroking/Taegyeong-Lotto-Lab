@@ -6,13 +6,12 @@ on:
       version:
         description: "Release 버전"
         required: true
-        default: "v2.0.0"
+        default: "v3.0.0"
   push:
     branches: [main]
     paths:
       - "app.py"
       - "requirements.txt"
-      - "windows_ocr.ps1"
       - ".github/workflows/windows-release.yml"
 
 permissions:
@@ -36,44 +35,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Windows 프로그램 생성
+      - name: 단일 EXE 생성
         shell: pwsh
         run: |
           pyinstaller `
             --noconfirm `
             --clean `
             --windowed `
-            --onedir `
+            --onefile `
             --name "TaegyeongLottoLab" `
             --collect-all PySide6 `
             --collect-all pandas `
             --hidden-import openpyxl `
-            --add-data "windows_ocr.ps1;." `
             app.py
 
-      - name: 필수 파일 확인
+      - name: EXE 확인
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/TaegyeongLottoLab/TaegyeongLottoLab.exe")) {
+          if (!(Test-Path "dist/TaegyeongLottoLab.exe")) {
             throw "EXE 생성 실패"
           }
-          if (!(Test-Path "dist/TaegyeongLottoLab/_internal/windows_ocr.ps1") -and
-              !(Test-Path "dist/TaegyeongLottoLab/windows_ocr.ps1")) {
-            throw "windows_ocr.ps1 누락"
-          }
-
-      - name: 배포 ZIP 생성
-        shell: pwsh
-        run: |
-          Compress-Archive `
-            -Path "dist/TaegyeongLottoLab/*" `
-            -DestinationPath "TaegyeongLottoLab-Windows-v2.0.0.zip" `
-            -Force
+          Get-Item "dist/TaegyeongLottoLab.exe" |
+            Format-List Name, Length, FullName
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows-v2.0.0
-          path: TaegyeongLottoLab-Windows-v2.0.0.zip
+          name: TaegyeongLottoLab-Windows-v3.0.0
+          path: dist/TaegyeongLottoLab.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -87,10 +75,10 @@ jobs:
           gh release view "$env:RELEASE_VERSION" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload "$env:RELEASE_VERSION" `
-              "TaegyeongLottoLab-Windows-v2.0.0.zip" --clobber
+              "dist/TaegyeongLottoLab.exe" --clobber
           } else {
             gh release create "$env:RELEASE_VERSION" `
-              "TaegyeongLottoLab-Windows-v2.0.0.zip" `
+              "dist/TaegyeongLottoLab.exe" `
               --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
-              --notes "Windows 내장 OCR 기반 안정화 버전."
+              --notes "외부 OCR 파일이 필요 없는 Windows 내장 OCR 버전입니다."
           }
