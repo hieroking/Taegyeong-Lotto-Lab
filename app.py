@@ -1,38 +1,689 @@
+"""
+太炅 Lotto Lab Ultimate v0.2
+
+기능
+- 역대 로또 Excel 불러오기
+- 번호 빈도 / 페어 / 트리플 분석
+- 사진 파일 목록 등록
+- 번호 직접 입력 및 출현횟수 집계
+- 역대 1등·2등 동일 조합 제외
+- 조건 기반 추천 조합 생성
+- 직접 만든 조합 검사
+- 추천 결과 Excel 저장
+"""
+
+from __future__ import annotations
+
+import math
+import re
 import sys
+import traceback
+from collections import Counter
+from dataclasses import dataclass
+from itertools import combinations
+from pathlib import Path
+from typing import Iterable
+
+import pandas as pd
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QWidget, QVBoxLayout
+from PySide6.QtGui import QAction, QFont
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+)
+
+APP_NAME = "太炅 Lotto Lab Ultimate"
+VERSION = "0.2.0"
+
+
+@dataclass(frozen=True)
+class Draw:
+    round_no: int
+    numbers: tuple[int, int, int, int, int, int]
+    bonus: int | None
+
+
+def parse_numbers(text: str) -> list[int]:
+    values = [int(x) for x in re.findall(r"\d+", text)]
+    invalid = [x for x in values if not 1 <= x <= 45]
+    if invalid:
+        raise ValueError(f"1~45 범위를 벗어난 번호: {invalid}")
+    return values
+
+
+class LottoAnalyzer:
+    def __init__(self) -> None:
+        self.draws: list[Draw] = []
+        self.number_counts: Counter[int] = Counter()
+        self.pair_counts: Counter[tuple[int, int]] = Counter()
+        self.triple_counts: Counter[tuple[int, int, int]] = Counter()
+        self.first_prize: set[tuple[int, ...]] = set()
+        self.second_prize: set[tuple[int, ...]] = set()
+
+    def load_excel(self, path: str | Path) -> None:
+        xls = pd.ExcelFile(path)
+        best: list[Draw] = []
+
+        for sheet in xls.sheet_names:
+            try:
+                raw = pd.read_excel(path, sheet_name=sheet, header=None)
+            except Exception:
+                continue
+            draws = self._parse_sheet(raw)
+            if len(draws) > len(best):
+                best = draws
+
+        if not best:
+            raise ValueError(
+                "회차와 당첨번호 6개를 찾지 못했습니다. "
+                "첫 행에 회차·당첨번호·보너스가 있는 파일을 사용하세요."
+            )
+
+        self.draws = sorted(best, key=lambda d: d.round_no)
+        self._analyze()
+
+    @staticmethod
+    def _parse_sheet(df: pd.DataFrame) -> list[Draw]:
+        if df.empty or df.shape[1] < 7:
+            return []
+
+        # 사용자가 올린 원본 형식: 회차, 추첨일, 첫번째~여섯번째, 보너스
+        header_row = None
+        for i in range(min(20, len(df))):
+            texts = [str(v).strip().lower() for v in df.iloc[i].tolist()]
+            if any("회차" in x or x == "round" for x in texts):
+                header_row = i
+                break
+
+        if header_row is None:
+            return []
+
+        headers = [str(v).strip() for v in df.iloc[header_row].tolist()]
+        body = df.iloc[header_row + 1:].copy()
+        body.columns = headers
+
+        round_col = next((c for c in headers if "회차" in c.lower() or c.lower() == "round"), None)
+        bonus_col = next((c for c in headers if "보너스" in c.lower() or "bonus" in c.lower()), None)
+
+        if round_col is None:
+            return []
+
+        # 당첨 번호 후보를 우선적으로 헤더명으로 찾음
+        order_words = ("첫", "두", "세", "네", "다섯", "여섯")
+        num_cols = [c for c in headers if any(w in c for w in order_words)]
+
+        # 일반적인 번호1~번호6 형식도 지원
+        if len(num_cols) < 6:
+            num_cols = [
+                c for c in headers
+                if re.search(r"(번호|num|ball)\s*[1-6]$", c, re.I)
+                and c != bonus_col
+            ]
+
+        # 그래도 못 찾으면 회차 뒤쪽 숫자 컬럼 중 1~45 비율이 높은 6개 선택
+        if len(num_cols) < 6:
+            candidates = []
+            for c in headers:
+                if c in (round_col, bonus_col):
+                    continue
+                s = pd.to_numeric(body[c], errors="coerce").dropna()
+                if len(s) >= 10 and s.between(1, 45).mean() >= 0.85:
+                    candidates.append(c)
+            num_cols = candidates[:6]
+
+        if len(num_cols) < 6:
+            return []
+
+        draws: list[Draw] = []
+        for _, row in body.iterrows():
+            try:
+                round_no = int(float(row[round_col]))
+                nums = tuple(sorted(int(float(row[c])) for c in num_cols[:6]))
+            except (ValueError, TypeError):
+                continue
+
+            if len(set(nums)) != 6 or not all(1 <= x <= 45 for x in nums):
+                continue
+
+            bonus = None
+            if bonus_col and pd.notna(row.get(bonus_col)):
+                try:
+                    b = int(float(row[bonus_col]))
+                    if 1 <= b <= 45:
+                        bonus = b
+                except (ValueError, TypeError):
+                    pass
+
+            draws.append(Draw(round_no, nums, bonus))
+        return draws
+
+    def _analyze(self) -> None:
+        self.number_counts.clear()
+        self.pair_counts.clear()
+        self.triple_counts.clear()
+        self.first_prize.clear()
+        self.second_prize.clear()
+
+        for draw in self.draws:
+            self.number_counts.update(draw.numbers)
+            self.pair_counts.update(combinations(draw.numbers, 2))
+            self.triple_counts.update(combinations(draw.numbers, 3))
+            self.first_prize.add(draw.numbers)
+
+            # 2등 조합 = 본번호 5개 + 보너스번호
+            if draw.bonus is not None:
+                for five in combinations(draw.numbers, 5):
+                    self.second_prize.add(tuple(sorted((*five, draw.bonus))))
+
+    def check_combo(self, combo: tuple[int, ...]) -> dict:
+        combo = tuple(sorted(combo))
+        same_first = combo in self.first_prize
+        same_second = combo in self.second_prize
+        matches: list[tuple[int, int]] = []
+        s = set(combo)
+        for draw in self.draws:
+            count = len(s.intersection(draw.numbers))
+            if count >= 4:
+                matches.append((draw.round_no, count))
+        matches.sort(key=lambda x: (-x[1], -x[0]))
+        return {"first": same_first, "second": same_second, "matches": matches}
+
+
+class Recommender:
+    def __init__(self, analyzer: LottoAnalyzer) -> None:
+        self.a = analyzer
+
+    @staticmethod
+    def consecutive_pairs(combo: tuple[int, ...]) -> int:
+        return sum(1 for a, b in zip(combo, combo[1:]) if b - a == 1)
+
+    def score(self, combo: tuple[int, ...], source_weights: Counter[int]) -> float:
+        # 각각의 점수는 순위용 통계 점수이며 당첨확률이 아님
+        source = sum(source_weights[n] for n in combo) * 12.0
+        freq = sum(self.a.number_counts[n] for n in combo) / max(1, len(self.a.draws))
+        pair = sum(self.a.pair_counts[p] for p in combinations(combo, 2)) / 15.0
+        triple = sum(self.a.triple_counts[t] for t in combinations(combo, 3)) / 20.0
+        return source + freq + pair * 0.8 + triple * 1.2
+
+    def generate(
+        self,
+        source_weights: Counter[int],
+        count: int,
+        sum_min: int,
+        sum_max: int,
+        allow_consecutive: bool,
+    ) -> list[tuple[float, tuple[int, ...]]]:
+        pool = sorted(source_weights)
+        if len(pool) < 6:
+            raise ValueError("고유 번호가 최소 6개 필요합니다.")
+
+        candidates = []
+        for combo in combinations(pool, 6):
+            total = sum(combo)
+            if not sum_min <= total <= sum_max:
+                continue
+
+            odd = sum(n % 2 for n in combo)
+            if odd not in (2, 3, 4):
+                continue
+
+            high = sum(n >= 23 for n in combo)
+            if high not in (2, 3, 4):
+                continue
+
+            if not allow_consecutive and self.consecutive_pairs(combo) > 0:
+                continue
+            if self.consecutive_pairs(combo) > 2:
+                continue
+
+            if combo in self.a.first_prize or combo in self.a.second_prize:
+                continue
+
+            candidates.append((self.score(combo, source_weights), combo))
+
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        return candidates[:count]
+
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("太炅 Lotto Lab Ultimate")
-        self.resize(1000, 650)
+        self.analyzer = LottoAnalyzer()
+        self.photo_paths: list[str] = []
+        self.recommendations: list[tuple[float, tuple[int, ...]]] = []
+
+        self.setWindowTitle(f"{APP_NAME} v{VERSION}")
+        self.resize(1320, 850)
+        self.setMinimumSize(1100, 700)
+
+        self.stack = QStackedWidget()
+        self.pages = [
+            self.make_dashboard(),
+            self.make_source_page(),
+            self.make_stats_page(),
+            self.make_recommend_page(),
+            self.make_checker_page(),
+        ]
+        for p in self.pages:
+            self.stack.addWidget(p)
 
         root = QWidget()
-        layout = QVBoxLayout(root)
-
-        logo = QLabel("太炅")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet("font-size:72px; font-weight:800; color:#D4AF37;")
-
-        title = QLabel("Lotto Lab Ultimate")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size:30px; font-weight:700; color:#F4F0E6;")
-
-        note = QLabel("Windows 자동 빌드 기본 버전")
-        note.setAlignment(Qt.AlignCenter)
-        note.setStyleSheet("font-size:17px; color:#DDDDDD;")
-
-        layout.addStretch()
-        layout.addWidget(logo)
-        layout.addWidget(title)
-        layout.addWidget(note)
-        layout.addStretch()
-
-        root.setStyleSheet("background:#111111;")
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.make_sidebar())
+        layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
 
-app = QApplication(sys.argv)
-window = MainWindow()
-window.show()
-sys.exit(app.exec())
+        self.make_menu()
+        self.apply_theme()
+        self.statusBar().showMessage("역대 로또 Excel 파일을 불러오세요.")
+
+    def make_sidebar(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("sidebar")
+        box.setFixedWidth(245)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(18, 22, 18, 18)
+
+        logo = QLabel("太炅")
+        logo.setObjectName("logo")
+        logo.setAlignment(Qt.AlignCenter)
+        sub = QLabel("Lotto Lab Ultimate")
+        sub.setObjectName("subtitle")
+        sub.setAlignment(Qt.AlignCenter)
+        lay.addWidget(logo)
+        lay.addWidget(sub)
+        lay.addSpacing(20)
+
+        names = ["대시보드", "사진·번호 입력", "통계 분석", "추천 조합", "조합 검사"]
+        for i, name in enumerate(names):
+            b = QPushButton(name)
+            b.clicked.connect(lambda checked=False, idx=i: self.stack.setCurrentIndex(idx))
+            lay.addWidget(b)
+
+        lay.addStretch()
+        b = QPushButton("역대 Excel 불러오기")
+        b.setObjectName("primary")
+        b.clicked.connect(self.open_excel)
+        lay.addWidget(b)
+        return box
+
+    def make_menu(self) -> None:
+        menu = self.menuBar().addMenu("파일")
+        open_action = QAction("역대 Excel 불러오기", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self.open_excel)
+        menu.addAction(open_action)
+
+        export_action = QAction("추천 결과 Excel 저장", self)
+        export_action.triggered.connect(self.export_results)
+        menu.addAction(export_action)
+
+    def make_dashboard(self) -> QWidget:
+        p = QWidget()
+        lay = QVBoxLayout(p)
+        title = QLabel("대시보드")
+        title.setObjectName("pageTitle")
+        lay.addWidget(title)
+
+        self.dashboard_info = QLabel(
+            "역대 로또 당첨번호 Excel을 불러오면 분석이 시작됩니다.\n\n"
+            "사진은 파일로 등록하고, 사진에 적힌 번호는 직접 입력란에 붙여넣어 사용할 수 있습니다."
+        )
+        self.dashboard_info.setObjectName("card")
+        self.dashboard_info.setAlignment(Qt.AlignCenter)
+        self.dashboard_info.setMinimumHeight(230)
+        lay.addWidget(self.dashboard_info)
+
+        self.progress = QProgressBar()
+        lay.addWidget(self.progress)
+        lay.addStretch()
+        return p
+
+    def make_source_page(self) -> QWidget:
+        p = QWidget()
+        lay = QVBoxLayout(p)
+        title = QLabel("사진·번호 입력")
+        title.setObjectName("pageTitle")
+        lay.addWidget(title)
+
+        grid = QGridLayout()
+        left = QFrame()
+        left.setObjectName("card")
+        ll = QVBoxLayout(left)
+        ll.addWidget(QLabel("사진 파일 등록"))
+        self.photo_list = QListWidget()
+        ll.addWidget(self.photo_list)
+        row = QHBoxLayout()
+        add = QPushButton("사진 추가")
+        add.clicked.connect(self.add_photos)
+        delete = QPushButton("선택 삭제")
+        delete.clicked.connect(self.delete_photo)
+        row.addWidget(add)
+        row.addWidget(delete)
+        ll.addLayout(row)
+
+        right = QFrame()
+        right.setObjectName("card")
+        rl = QVBoxLayout(right)
+        rl.addWidget(QLabel(
+            "사진 또는 메모에 나온 번호를 그대로 입력하세요.\n"
+            "같은 번호가 반복되면 출현횟수 가중치로 반영됩니다."
+        ))
+        self.source_input = QPlainTextEdit()
+        self.source_input.setPlaceholderText(
+            "예:\n16 29 42 12 13\n"
+            "2 6 8 9 15 18 22 28 30 34 35 37"
+        )
+        rl.addWidget(self.source_input)
+        analyze = QPushButton("입력 번호 집계")
+        analyze.setObjectName("primary")
+        analyze.clicked.connect(self.update_source_counts)
+        rl.addWidget(analyze)
+        self.source_summary = QLabel("입력 대기")
+        self.source_summary.setWordWrap(True)
+        rl.addWidget(self.source_summary)
+
+        grid.addWidget(left, 0, 0)
+        grid.addWidget(right, 0, 1)
+        lay.addLayout(grid)
+        return p
+
+    def make_stats_page(self) -> QWidget:
+        p = QWidget()
+        lay = QVBoxLayout(p)
+        title = QLabel("통계 분석")
+        title.setObjectName("pageTitle")
+        lay.addWidget(title)
+
+        self.stats_type = QComboBox()
+        self.stats_type.addItems(["번호 빈도", "페어 상위 100", "트리플 상위 100"])
+        self.stats_type.currentIndexChanged.connect(self.refresh_stats_table)
+        lay.addWidget(self.stats_type)
+
+        self.stats_table = QTableWidget(0, 3)
+        self.stats_table.setHorizontalHeaderLabels(["순위", "번호/조합", "출현 횟수"])
+        self.stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        lay.addWidget(self.stats_table)
+        return p
+
+    def make_recommend_page(self) -> QWidget:
+        p = QWidget()
+        lay = QVBoxLayout(p)
+        title = QLabel("추천 조합")
+        title.setObjectName("pageTitle")
+        lay.addWidget(title)
+
+        opts = QFrame()
+        opts.setObjectName("card")
+        form = QFormLayout(opts)
+
+        self.rec_count = QSpinBox()
+        self.rec_count.setRange(1, 100)
+        self.rec_count.setValue(20)
+
+        self.sum_min = QSpinBox()
+        self.sum_min.setRange(21, 255)
+        self.sum_min.setValue(100)
+        self.sum_max = QSpinBox()
+        self.sum_max.setRange(21, 255)
+        self.sum_max.setValue(180)
+
+        self.allow_consecutive = QCheckBox("연속번호 허용")
+        self.allow_consecutive.setChecked(True)
+
+        form.addRow("추천 개수", self.rec_count)
+        form.addRow("번호 합계 최소", self.sum_min)
+        form.addRow("번호 합계 최대", self.sum_max)
+        form.addRow("", self.allow_consecutive)
+
+        run = QPushButton("추천 조합 생성")
+        run.setObjectName("primary")
+        run.clicked.connect(self.generate_recommendations)
+        form.addRow("", run)
+        lay.addWidget(opts)
+
+        self.rec_table = QTableWidget(0, 6)
+        self.rec_table.setHorizontalHeaderLabels(
+            ["순위", "추천 조합", "분석 점수", "합계", "홀짝", "고저"]
+        )
+        self.rec_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        lay.addWidget(self.rec_table)
+
+        export = QPushButton("추천 결과 Excel 저장")
+        export.clicked.connect(self.export_results)
+        lay.addWidget(export)
+        return p
+
+    def make_checker_page(self) -> QWidget:
+        p = QWidget()
+        lay = QVBoxLayout(p)
+        title = QLabel("조합 검사")
+        title.setObjectName("pageTitle")
+        lay.addWidget(title)
+
+        self.check_input = QLineEdit()
+        self.check_input.setPlaceholderText("예: 12 16 22 29 34 42")
+        lay.addWidget(self.check_input)
+
+        btn = QPushButton("검사")
+        btn.setObjectName("primary")
+        btn.clicked.connect(self.check_combo)
+        lay.addWidget(btn)
+
+        self.check_result = QPlainTextEdit()
+        self.check_result.setReadOnly(True)
+        lay.addWidget(self.check_result)
+        return p
+
+    def open_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "역대 로또 당첨번호 Excel 선택", "",
+            "Excel (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        try:
+            self.progress.setValue(15)
+            QApplication.processEvents()
+            self.analyzer.load_excel(path)
+            self.progress.setValue(100)
+            latest = self.analyzer.draws[-1].round_no
+            self.dashboard_info.setText(
+                f"파일: {Path(path).name}\n"
+                f"분석 회차: {len(self.analyzer.draws):,}회\n"
+                f"최신 회차: {latest}회\n"
+                f"1등 조합: {len(self.analyzer.first_prize):,}개\n"
+                f"2등 성립 조합: {len(self.analyzer.second_prize):,}개\n\n"
+                "번호·페어·트리플 분석 완료"
+            )
+            self.refresh_stats_table()
+            self.statusBar().showMessage("Excel 분석 완료")
+        except Exception as e:
+            self.progress.setValue(0)
+            QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
+
+    def add_photos(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "번호 사진 선택", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
+        )
+        for path in paths:
+            if path not in self.photo_paths:
+                self.photo_paths.append(path)
+                self.photo_list.addItem(Path(path).name)
+
+    def delete_photo(self) -> None:
+        row = self.photo_list.currentRow()
+        if row >= 0:
+            self.photo_list.takeItem(row)
+            self.photo_paths.pop(row)
+
+    def source_weights(self) -> Counter[int]:
+        nums = parse_numbers(self.source_input.toPlainText())
+        return Counter(nums)
+
+    def update_source_counts(self) -> None:
+        try:
+            counts = self.source_weights()
+            if not counts:
+                self.source_summary.setText("입력된 번호가 없습니다.")
+                return
+            ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+            self.source_summary.setText(
+                f"고유 번호 {len(counts)}개 / 전체 입력 {sum(counts.values())}개\n" +
+                " · ".join(f"{n}번 {c}회" for n, c in ranked)
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "번호 입력 오류", str(e))
+
+    def refresh_stats_table(self) -> None:
+        idx = self.stats_type.currentIndex()
+        if idx == 0:
+            items = sorted(
+                ((n, self.analyzer.number_counts[n]) for n in range(1, 46)),
+                key=lambda x: (-x[1], x[0])
+            )
+        elif idx == 1:
+            items = self.analyzer.pair_counts.most_common(100)
+        else:
+            items = self.analyzer.triple_counts.most_common(100)
+
+        self.stats_table.setRowCount(len(items))
+        for r, (key, count) in enumerate(items, 1):
+            text = str(key) if isinstance(key, int) else " · ".join(map(str, key))
+            self.stats_table.setItem(r - 1, 0, QTableWidgetItem(str(r)))
+            self.stats_table.setItem(r - 1, 1, QTableWidgetItem(text))
+            self.stats_table.setItem(r - 1, 2, QTableWidgetItem(str(count)))
+        self.stats_table.resizeColumnsToContents()
+
+    def generate_recommendations(self) -> None:
+        if not self.analyzer.draws:
+            QMessageBox.warning(self, "데이터 없음", "먼저 역대 로또 Excel을 불러오세요.")
+            return
+        try:
+            weights = self.source_weights()
+            recommender = Recommender(self.analyzer)
+            self.recommendations = recommender.generate(
+                weights,
+                self.rec_count.value(),
+                self.sum_min.value(),
+                self.sum_max.value(),
+                self.allow_consecutive.isChecked(),
+            )
+            if not self.recommendations:
+                QMessageBox.information(
+                    self, "결과 없음",
+                    "조건을 만족하는 조합이 없습니다. 합계 범위나 번호 입력을 조정하세요."
+                )
+                return
+
+            self.rec_table.setRowCount(len(self.recommendations))
+            for r, (score, combo) in enumerate(self.recommendations, 1):
+                odd = sum(x % 2 for x in combo)
+                high = sum(x >= 23 for x in combo)
+                values = [
+                    str(r), " · ".join(map(str, combo)), f"{score:.2f}",
+                    str(sum(combo)), f"{odd}:{6-odd}", f"{high}:{6-high}"
+                ]
+                for c, value in enumerate(values):
+                    self.rec_table.setItem(r - 1, c, QTableWidgetItem(value))
+            self.rec_table.resizeColumnsToContents()
+            self.statusBar().showMessage(f"추천 조합 {len(self.recommendations)}개 생성 완료")
+        except Exception as e:
+            QMessageBox.warning(self, "추천 오류", str(e))
+
+    def check_combo(self) -> None:
+        if not self.analyzer.draws:
+            QMessageBox.warning(self, "데이터 없음", "먼저 역대 로또 Excel을 불러오세요.")
+            return
+        try:
+            nums = sorted(set(parse_numbers(self.check_input.text())))
+            if len(nums) != 6:
+                raise ValueError("서로 다른 번호 6개를 입력하세요.")
+            combo = tuple(nums)
+            result = self.analyzer.check_combo(combo)
+            lines = [
+                f"검사 조합: {' · '.join(map(str, combo))}",
+                f"역대 1등과 동일: {'예' if result['first'] else '아니오'}",
+                f"역대 2등 성립 조합과 동일: {'예' if result['second'] else '아니오'}",
+                "",
+                "과거 본번호 일치 회차(4개 이상):"
+            ]
+            if result["matches"]:
+                lines += [f"- {round_no}회: {count}개 일치" for round_no, count in result["matches"][:30]]
+            else:
+                lines.append("- 없음")
+            self.check_result.setPlainText("\n".join(lines))
+        except Exception as e:
+            QMessageBox.warning(self, "검사 오류", str(e))
+
+    def export_results(self) -> None:
+        if not self.recommendations:
+            QMessageBox.information(self, "저장할 결과 없음", "먼저 추천 조합을 생성하세요.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "추천 결과 저장", "Taegyeong_Lotto_추천결과.xlsx", "Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        rows = []
+        for rank, (score, combo) in enumerate(self.recommendations, 1):
+            rows.append({
+                "순위": rank,
+                "번호1": combo[0], "번호2": combo[1], "번호3": combo[2],
+                "번호4": combo[3], "번호5": combo[4], "번호6": combo[5],
+                "분석점수": round(score, 2),
+                "합계": sum(combo),
+                "역대1등동일": "아니오",
+                "역대2등동일": "아니오",
+            })
+        pd.DataFrame(rows).to_excel(path, index=False)
+        QMessageBox.information(self, "저장 완료", path)
+
+    def apply_theme(self) -> None:
+        self.setStyleSheet("""
+        QMainWindow, QWidget {
+            background:#111111; color:#F4F0E6;
+            font-family:"Malgun Gothic"; font-size:14px;
+        }
+        #sidebar { background:#080808; border-right:1px solid #4A3A12; }
+        #logo { color:#D4AF37; font-size:48px; font-weight:800; }
+        #subtitle { color:#E8D9A7; font-weight:700; }
+        #pageTitle { color:#D4AF37; font-size:28px; font-weight:800; padding:8px; }
+        #card { background:#1A1A1A; border:1px solid #4A3A12;
+                border-radius:12px; padding:16px; }
+        QPushButton {
+            background:#252525; color:#F4F0E6; border:1px solid #3A3A3A;
+            border-radius:8px; padding:11px; text-align:left;
+        }
+        QPushButton:hover { border-color:#D4AF37; background:#302817; }
+        #primary { background:#D4AF37; color:#111111; font-weight:800; text-align:center; }
+        QPlainTextEdit, QLineEdit, QListWidget, QTableWidget, QSpinBox, QComboBox {
+            background:#181818; color:#F4F0E6; border:1px solid #404040;
+            border-radius:7px; padding:6px;
+        }
+        QHeaderView::section {
+            background:#2A2416; color:#F0D980; padding:8px; border:0;
+        }
+        QProgressBar { background:#222; border:1px solid #444; border-radius:7px; text-align:center; }
+        QProgressBar::chunk { background:#D4AF37; border-radius:6px; }
+        """)
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Malgun Gothic", 10))
+    win = MainWindow()
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
