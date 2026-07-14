@@ -30,7 +30,7 @@ from typing import Iterable
 
 import pandas as pd
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 
 
@@ -224,18 +224,61 @@ class LottoAnalyzer:
 class Recommender:
     def __init__(self, analyzer: LottoAnalyzer) -> None:
         self.a = analyzer
+        self.max_pair_count = max(self.a.pair_counts.values(), default=1)
 
     @staticmethod
     def consecutive_pairs(combo: tuple[int, ...]) -> int:
         return sum(1 for a, b in zip(combo, combo[1:]) if b - a == 1)
 
-    def score(self, combo: tuple[int, ...], source_weights: Counter[int]) -> float:
-        # 각각의 점수는 순위용 통계 점수이며 당첨확률이 아님
+    def pair_details(
+        self,
+        combo: tuple[int, ...],
+        top_n: int = 3,
+    ) -> list[tuple[tuple[int, int], int, float]]:
+        """조합 안에서 역대 함께 나온 횟수가 높은 페어를 반환합니다."""
+        details = []
+        for pair in combinations(combo, 2):
+            count = self.a.pair_counts[pair]
+            strength = count / max(1, self.max_pair_count) * 100
+            details.append((pair, count, strength))
+        details.sort(key=lambda item: (-item[1], item[0]))
+        return details[:top_n]
+
+    def compatibility_score(self, combo: tuple[int, ...]) -> float:
+        """페어 공동출현 빈도를 0~100 범위로 환산한 궁합 점수입니다."""
+        pair_values = [
+            self.a.pair_counts[pair] / max(1, self.max_pair_count) * 100
+            for pair in combinations(combo, 2)
+        ]
+        if not pair_values:
+            return 0.0
+
+        # 상위 페어를 더 중요하게 반영하되 전체 조합의 궁합도 함께 반영
+        pair_values.sort(reverse=True)
+        top_average = sum(pair_values[:5]) / min(5, len(pair_values))
+        all_average = sum(pair_values) / len(pair_values)
+        return top_average * 0.7 + all_average * 0.3
+
+    def score(
+        self,
+        combo: tuple[int, ...],
+        source_weights: Counter[int],
+        compatibility_weight: int,
+    ) -> float:
+        # 통계 기반 순위 점수이며 실제 당첨 확률을 뜻하지 않습니다.
         source = sum(source_weights[n] for n in combo) * 12.0
         freq = sum(self.a.number_counts[n] for n in combo) / max(1, len(self.a.draws))
         pair = sum(self.a.pair_counts[p] for p in combinations(combo, 2)) / 15.0
         triple = sum(self.a.triple_counts[t] for t in combinations(combo, 3)) / 20.0
-        return source + freq + pair * 0.8 + triple * 1.2
+        compatibility = self.compatibility_score(combo)
+
+        return (
+            source
+            + freq
+            + pair * 0.8
+            + triple * 1.2
+            + compatibility * (compatibility_weight / 100.0)
+        )
 
     def generate(
         self,
@@ -244,6 +287,7 @@ class Recommender:
         sum_min: int,
         sum_max: int,
         allow_consecutive: bool,
+        compatibility_weight: int,
     ) -> list[tuple[float, tuple[int, ...]]]:
         pool = sorted(source_weights)
         if len(pool) < 6:
@@ -271,7 +315,12 @@ class Recommender:
             if combo in self.a.first_prize or combo in self.a.second_prize:
                 continue
 
-            candidates.append((self.score(combo, source_weights), combo))
+            candidates.append(
+                (
+                    self.score(combo, source_weights, compatibility_weight),
+                    combo,
+                )
+            )
 
         candidates.sort(key=lambda x: (-x[0], x[1]))
         return candidates[:count]
@@ -468,9 +517,18 @@ class MainWindow(QMainWindow):
         self.allow_consecutive = QCheckBox("연속번호 허용")
         self.allow_consecutive.setChecked(True)
 
+        self.compatibility_weight = QSpinBox()
+        self.compatibility_weight.setRange(0, 100)
+        self.compatibility_weight.setValue(35)
+        self.compatibility_weight.setSuffix("%")
+        self.compatibility_weight.setToolTip(
+            "역대 함께 나온 번호 페어를 추천 점수에 반영하는 정도입니다."
+        )
+
         form.addRow("추천 개수", self.rec_count)
         form.addRow("번호 합계 최소", self.sum_min)
         form.addRow("번호 합계 최대", self.sum_max)
+        form.addRow("같이 나온 수 가중치", self.compatibility_weight)
         form.addRow("", self.allow_consecutive)
 
         run = QPushButton("추천 조합 생성")
@@ -479,9 +537,12 @@ class MainWindow(QMainWindow):
         form.addRow("", run)
         lay.addWidget(opts)
 
-        self.rec_table = QTableWidget(0, 6)
+        self.rec_table = QTableWidget(0, 8)
         self.rec_table.setHorizontalHeaderLabels(
-            ["순위", "추천 조합", "분석 점수", "합계", "홀짝", "고저"]
+            [
+                "순위", "추천 조합", "분석 점수", "궁합 점수",
+                "같이 잘 나온 수", "합계", "홀짝", "고저"
+            ]
         )
         self.rec_table.setEditTriggers(QTableWidget.NoEditTriggers)
         lay.addWidget(self.rec_table)
@@ -729,6 +790,7 @@ class MainWindow(QMainWindow):
                 self.sum_min.value(),
                 self.sum_max.value(),
                 self.allow_consecutive.isChecked(),
+                self.compatibility_weight.value(),
             )
             if not self.recommendations:
                 QMessageBox.information(
@@ -741,12 +803,50 @@ class MainWindow(QMainWindow):
             for r, (score, combo) in enumerate(self.recommendations, 1):
                 odd = sum(x % 2 for x in combo)
                 high = sum(x >= 23 for x in combo)
+                compatibility = recommender.compatibility_score(combo)
+                pair_details = recommender.pair_details(combo, top_n=3)
+
+                pair_text = ", ".join(
+                    f"{a}↔{b} {count}회"
+                    for (a, b), count, _ in pair_details
+                )
+
                 values = [
-                    str(r), " · ".join(map(str, combo)), f"{score:.2f}",
-                    str(sum(combo)), f"{odd}:{6-odd}", f"{high}:{6-high}"
+                    str(r),
+                    " · ".join(map(str, combo)),
+                    f"{score:.2f}",
+                    f"{compatibility:.1f}",
+                    pair_text,
+                    str(sum(combo)),
+                    f"{odd}:{6-odd}",
+                    f"{high}:{6-high}",
                 ]
+
                 for c, value in enumerate(values):
-                    self.rec_table.setItem(r - 1, c, QTableWidgetItem(value))
+                    item = QTableWidgetItem(value)
+                    self.rec_table.setItem(r - 1, c, item)
+
+                # 같이 잘 나온 수와 궁합 점수를 색으로 구분
+                compatibility_item = self.rec_table.item(r - 1, 3)
+                pair_item = self.rec_table.item(r - 1, 4)
+                combo_item = self.rec_table.item(r - 1, 1)
+
+                if compatibility >= 70:
+                    color = QColor("#2E7D32")   # 강함: 녹색
+                elif compatibility >= 50:
+                    color = QColor("#9A7B16")   # 보통 이상: 금색
+                else:
+                    color = QColor("#5A3A3A")   # 낮음: 어두운 적색
+
+                for item in (compatibility_item, pair_item):
+                    item.setBackground(QBrush(color))
+                    item.setForeground(QBrush(QColor("#FFFFFF")))
+
+                if compatibility >= 70:
+                    combo_item.setForeground(QBrush(QColor("#7CFF8A")))
+                elif compatibility >= 50:
+                    combo_item.setForeground(QBrush(QColor("#FFD95A")))
+
             self.rec_table.resizeColumnsToContents()
             self.statusBar().showMessage(f"추천 조합 {len(self.recommendations)}개 생성 완료")
         except Exception as e:
@@ -790,12 +890,19 @@ class MainWindow(QMainWindow):
             path += ".xlsx"
 
         rows = []
+        recommender = Recommender(self.analyzer)
         for rank, (score, combo) in enumerate(self.recommendations, 1):
+            pair_details = recommender.pair_details(combo, top_n=3)
             rows.append({
                 "순위": rank,
                 "번호1": combo[0], "번호2": combo[1], "번호3": combo[2],
                 "번호4": combo[3], "번호5": combo[4], "번호6": combo[5],
                 "분석점수": round(score, 2),
+                "궁합점수": round(recommender.compatibility_score(combo), 1),
+                "같이잘나온수": ", ".join(
+                    f"{a}-{b}({count}회)"
+                    for (a, b), count, _ in pair_details
+                ),
                 "합계": sum(combo),
                 "역대1등동일": "아니오",
                 "역대2등동일": "아니오",

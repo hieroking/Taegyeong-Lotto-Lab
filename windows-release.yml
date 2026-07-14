@@ -6,7 +6,7 @@ on:
       version:
         description: "Release 버전"
         required: true
-        default: "v3.0.0"
+        default: "v3.1.0"
   push:
     branches: [main]
     paths:
@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows-v3.0.0
+          name: TaegyeongLottoLab-Windows-v3.1.0
           path: dist/TaegyeongLottoLab.exe
           if-no-files-found: error
           retention-days: 30
@@ -80,5 +80,5 @@ jobs:
             gh release create "$env:RELEASE_VERSION" `
               "dist/TaegyeongLottoLab.exe" `
               --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
-              --notes "외부 OCR 파일이 필요 없는 Windows 내장 OCR 버전입니다."
+              --notes "추천 조합에 공동출현 페어, 궁합 점수, 색상 표시와 가중치 기능을 추가했습니다."
           }
