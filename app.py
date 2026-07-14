@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 @dataclass(frozen=True)
@@ -399,7 +399,7 @@ class MainWindow(QMainWindow):
         right.setObjectName("card")
         rl = QVBoxLayout(right)
         rl.addWidget(QLabel(
-            "사진 또는 메모에 나온 번호를 그대로 입력하세요.\n"
+            "사진에서 인식된 번호가 자동으로 들어옵니다.\n"
             "같은 번호가 반복되면 출현횟수 가중치로 반영됩니다."
         ))
         self.source_input = QPlainTextEdit()
@@ -560,9 +560,17 @@ class MainWindow(QMainWindow):
         return numbers
 
     def extract_numbers_from_photo(self, path: str) -> list[int]:
-        image = cv2.imread(path)
+        # Windows의 한글·공백·긴 경로에서도 안전하게 사진을 읽습니다.
+        try:
+            file_bytes = np.fromfile(path, dtype=np.uint8)
+            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            raise ValueError(f"사진 파일을 열 수 없습니다: {exc}") from exc
+
         if image is None:
-            raise ValueError("사진 파일을 열 수 없습니다.")
+            raise ValueError(
+                "사진 파일을 열 수 없습니다. 파일이 손상되었거나 지원하지 않는 형식일 수 있습니다."
+            )
 
         # 휴대폰 상태표시줄과 하단 내비게이션 영역을 제외해 오인식을 줄임
         height, width = image.shape[:2]
@@ -575,7 +583,10 @@ class MainWindow(QMainWindow):
         gray = cv2.convertScaleAbs(gray, alpha=1.35, beta=8)
 
         engine = self._get_ocr_engine()
-        result, _ = engine(gray)
+        try:
+            result, _ = engine(gray)
+        except Exception as exc:
+            raise ValueError(f"OCR 처리 중 오류가 발생했습니다: {exc}") from exc
 
         texts: list[str] = []
         if result:
