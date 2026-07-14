@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "3.4.0"
+VERSION = "3.4.2"
 
 
 
@@ -431,6 +431,75 @@ class Recommender:
         candidates.sort(key=lambda x: (-x[0], x[1]))
         return candidates[:count]
 
+    def select_pool(
+        self,
+        source_weights: Counter[int],
+        category: str,
+        limit: int = 24,
+    ) -> list[int]:
+        """입력번호가 많아도 계산이 멈추지 않도록 카테고리별 핵심 번호를 선별합니다."""
+        numbers = sorted(source_weights)
+        if len(numbers) <= limit:
+            return numbers
+
+        max_input = max(source_weights.values(), default=1)
+
+        pair_centrality = {}
+        triple_centrality = {}
+        for n in numbers:
+            pair_centrality[n] = sum(
+                self.a.pair_counts[tuple(sorted((n, other)))]
+                for other in numbers
+                if other != n
+            )
+            triple_centrality[n] = sum(
+                count
+                for triple, count in self.a.triple_counts.items()
+                if n in triple
+            )
+
+        max_pair_c = max(pair_centrality.values(), default=1)
+        max_triple_c = max(triple_centrality.values(), default=1)
+        max_recent = max(
+            (self.a.recent_number_counts[n] for n in numbers),
+            default=1,
+        )
+
+        scores = {}
+        for n in numbers:
+            input_score = source_weights[n] / max_input * 100
+            pair_score = pair_centrality[n] / max_pair_c * 100
+            triple_score = triple_centrality[n] / max_triple_c * 100
+            recent_score = self.a.recent_number_counts[n] / max_recent * 100
+
+            if category == "나온횟수":
+                score = input_score * 0.75 + pair_score * 0.10 + recent_score * 0.15
+            elif category == "동반수":
+                score = pair_score * 0.75 + input_score * 0.15 + recent_score * 0.10
+            elif category == "트리플":
+                score = triple_score * 0.75 + pair_score * 0.15 + input_score * 0.10
+            elif category == "최근패턴":
+                score = recent_score * 0.75 + pair_score * 0.15 + input_score * 0.10
+            else:
+                score = (
+                    input_score * 0.30
+                    + pair_score * 0.25
+                    + triple_score * 0.20
+                    + recent_score * 0.25
+                )
+            scores[n] = score
+
+        ranked = sorted(numbers, key=lambda n: (-scores[n], n))
+
+        # 각 번호 구간에서 최소 2개씩 포함해 특정 구간 쏠림을 방지
+        selected = set(ranked[: max(14, limit - 10)])
+        for low, high in [(1, 10), (11, 20), (21, 30), (31, 40), (41, 45)]:
+            zone = [n for n in ranked if low <= n <= high][:2]
+            selected.update(zone)
+
+        final = sorted(selected, key=lambda n: (-scores[n], n))[:limit]
+        return sorted(final)
+
     def generate(
         self,
         source_weights: Counter[int],
@@ -440,7 +509,7 @@ class Recommender:
         allow_consecutive: bool,
         category: str,
     ) -> list[tuple[float, tuple[int, ...], dict[str, float]]]:
-        pool = sorted(source_weights)
+        pool = self.select_pool(source_weights, category, limit=24)
         if len(pool) < 6:
             raise ValueError("고유 번호가 최소 6개 필요합니다.")
 
@@ -661,6 +730,14 @@ class MainWindow(QMainWindow):
         self.rec_category.currentTextChanged.connect(self.generate_recommendations)
         lay.addWidget(self.rec_category)
 
+        self.rec_status = QLabel(
+            "역대 Excel을 불러오면 자체추천이 자동 계산됩니다.\n"
+            "추천조합·나온횟수·동반수·트리플·최근패턴은 입력번호 6개 이상이 필요합니다."
+        )
+        self.rec_status.setWordWrap(True)
+        self.rec_status.setObjectName("card")
+        lay.addWidget(self.rec_status)
+
         self.rec_table = QTableWidget(0, 10)
         self.rec_table.setHorizontalHeaderLabels(
             [
@@ -681,9 +758,10 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
         index = self.rec_category.findText(category)
         if index >= 0:
+            self.rec_category.blockSignals(True)
             self.rec_category.setCurrentIndex(index)
-        else:
-            self.generate_recommendations()
+            self.rec_category.blockSignals(False)
+        self.generate_recommendations()
 
     def open_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -707,8 +785,8 @@ class MainWindow(QMainWindow):
                 "번호·페어·트리플 분석 완료"
             )
             self.refresh_stats_table()
-            self.statusBar().showMessage("Excel 분석 완료 — 사진 또는 번호를 입력하세요.")
-            self.stack.setCurrentIndex(0)
+            self.statusBar().showMessage("Excel 분석 완료 — 자체추천 계산을 시작합니다.")
+            self.show_recommend_category("자체추천")
         except Exception as e:
             self.progress.setValue(0)
             QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
@@ -808,7 +886,7 @@ class MainWindow(QMainWindow):
         if all_numbers:
             self.append_ocr_numbers(all_numbers)
             self.statusBar().showMessage(
-                f"사진 {len(paths)}장 처리 완료 — 숫자 {len(all_numbers)}개 인식"
+                f"사진 {len(paths)}장 처리 완료 — 숫자 {len(all_numbers)}개 인식, 추천조합 계산 완료"
             )
         else:
             self.statusBar().showMessage("사진에서 1~45 숫자를 찾지 못했습니다.")
@@ -868,7 +946,8 @@ class MainWindow(QMainWindow):
                 " · ".join(f"{n}번 {c}회" for n, c in ranked)
             )
             if self.analyzer.draws and len(counts) >= 6:
-                self.generate_recommendations()
+                # 사진 또는 직접 입력이 들어오면 자동으로 추천조합 화면으로 이동해 계산
+                self.show_recommend_category("추천조합")
         except Exception as e:
             QMessageBox.warning(self, "번호 입력 오류", str(e))
 
@@ -900,9 +979,23 @@ class MainWindow(QMainWindow):
             category = self.rec_category.currentText()
 
             if category == "자체추천":
+                self.statusBar().showMessage("역대 전체 데이터로 자체추천 100조합 계산 중...")
+                QApplication.processEvents()
                 self.recommendations = recommender.generate_self(100)
             else:
                 weights = self.source_weights()
+                if len(weights) < 6:
+                    self.rec_table.setRowCount(0)
+                    self.rec_status.setText(
+                        f"{category}은 사진 또는 직접 입력에서 고유 번호 6개 이상이 필요합니다."
+                    )
+                    self.statusBar().showMessage(
+                        f"{category}: 사진 또는 직접 입력으로 고유 번호 6개 이상을 입력하세요."
+                    )
+                    return
+                self.rec_status.setText(f"{category} 100조합을 계산 중입니다...")
+                self.statusBar().showMessage(f"{category} 100조합 계산 중...")
+                QApplication.processEvents()
                 self.recommendations = recommender.generate(
                     weights,
                     100,
@@ -965,6 +1058,9 @@ class MainWindow(QMainWindow):
                     combo_item.setForeground(QBrush(QColor("#FFD95A")))
 
             self.rec_table.resizeColumnsToContents()
+            self.rec_status.setText(
+                f"{category} 기준 {len(self.recommendations)}조합 계산 완료"
+            )
             self.statusBar().showMessage(
                 f"{category} 기준 추천 {len(self.recommendations)}개 생성 완료"
             )
