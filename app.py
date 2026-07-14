@@ -7,7 +7,7 @@
 - 사진 파일 목록 등록
 - 번호 직접 입력 및 출현횟수 집계
 - 역대 1등·2등 동일 조합 제외
-- 조건 기반 추천 조합 생성
+- 조건 기반 추천조합 생성
 - 직접 만든 조합 검사
 - 추천 결과 Excel 저장
 """
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 
 
 
@@ -213,7 +213,7 @@ class LottoAnalyzer:
                 for five in combinations(draw.numbers, 5):
                     self.second_prize.add(tuple(sorted((*five, draw.bonus))))
 
-        # 최근 패턴은 최신 100회를 기준으로 계산
+        # 최근패턴은 최신 100회를 기준으로 계산
         for draw in self.draws[-100:]:
             self.recent_number_counts.update(draw.numbers)
             self.recent_pair_counts.update(combinations(draw.numbers, 2))
@@ -237,11 +237,11 @@ class Recommender:
     """입력빈도·동반수·트리플·최근패턴을 자동 종합해 순위를 계산합니다."""
 
     CATEGORY_NAMES = {
-        "종합 추천": "composite",
-        "입력 횟수": "input",
+        "추천조합": "composite",
+        "나온횟수": "input",
         "동반수": "pair",
         "트리플": "triple",
-        "최근 패턴": "recent",
+        "최근패턴": "recent",
     }
 
     def __init__(self, analyzer: LottoAnalyzer) -> None:
@@ -386,9 +386,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.pages = [
-            self.make_dashboard(),
             self.make_source_page(),
-            self.make_stats_page(),
             self.make_recommend_page(),
         ]
         for p in self.pages:
@@ -423,10 +421,16 @@ class MainWindow(QMainWindow):
         lay.addWidget(sub)
         lay.addSpacing(20)
 
-        names = ["대시보드", "사진·번호 입력", "통계 분석", "추천 조합"]
+        names = ["번호 입력", "추천조합", "나온횟수", "동반수", "트리플", "최근패턴"]
         for i, name in enumerate(names):
             b = QPushButton(name)
-            b.clicked.connect(lambda checked=False, idx=i: self.stack.setCurrentIndex(idx))
+            if i == 0:
+                b.clicked.connect(lambda checked=False: self.stack.setCurrentIndex(0))
+            else:
+                category_name = name
+                b.clicked.connect(
+                    lambda checked=False, cat=category_name: self.show_recommend_category(cat)
+                )
             lay.addWidget(b)
 
         lay.addStretch()
@@ -541,59 +545,31 @@ class MainWindow(QMainWindow):
     def make_recommend_page(self) -> QWidget:
         p = QWidget()
         lay = QVBoxLayout(p)
-        title = QLabel("추천 조합")
+
+        title = QLabel("자동 추천 결과")
         title.setObjectName("pageTitle")
         lay.addWidget(title)
 
         guide = QLabel(
-            "입력한 번호를 기준으로 자동 종합 추천을 계산합니다.\n"
-            "카테고리를 바꾸면 입력 횟수·동반수·트리플·최근 패턴별 순위가 각각 다르게 표시됩니다."
+            "사진 또는 직접 입력한 번호를 기준으로 자동 계산합니다.\n"
+            "추천 100조합 · 번호합계 20~300 · 역대 1등·2등 동일 조합 제외"
         )
         guide.setObjectName("card")
         guide.setWordWrap(True)
         lay.addWidget(guide)
 
-        opts = QFrame()
-        opts.setObjectName("card")
-        form = QFormLayout(opts)
-
         self.rec_category = QComboBox()
         self.rec_category.addItems(
-            ["종합 추천", "입력 횟수", "동반수", "트리플", "최근 패턴"]
+            ["추천조합", "나온횟수", "동반수", "트리플", "최근패턴"]
         )
         self.rec_category.currentTextChanged.connect(self.generate_recommendations)
-
-        self.rec_count = QSpinBox()
-        self.rec_count.setRange(1, 100)
-        self.rec_count.setValue(20)
-
-        self.sum_min = QSpinBox()
-        self.sum_min.setRange(21, 255)
-        self.sum_min.setValue(100)
-        self.sum_max = QSpinBox()
-        self.sum_max.setRange(21, 255)
-        self.sum_max.setValue(180)
-
-        self.allow_consecutive = QCheckBox("연속번호 허용")
-        self.allow_consecutive.setChecked(True)
-
-        form.addRow("순위 카테고리", self.rec_category)
-        form.addRow("추천 개수", self.rec_count)
-        form.addRow("번호 합계 최소", self.sum_min)
-        form.addRow("번호 합계 최대", self.sum_max)
-        form.addRow("", self.allow_consecutive)
-
-        run = QPushButton("카테고리별 추천 생성")
-        run.setObjectName("primary")
-        run.clicked.connect(self.generate_recommendations)
-        form.addRow("", run)
-        lay.addWidget(opts)
+        lay.addWidget(self.rec_category)
 
         self.rec_table = QTableWidget(0, 10)
         self.rec_table.setHorizontalHeaderLabels(
             [
-                "순위", "추천 조합", "카테고리 점수", "종합 점수",
-                "입력 횟수", "동반수", "트리플", "최근 패턴",
+                "순위", "추천조합", "카테고리 점수", "종합 점수",
+                "나온횟수", "동반수", "트리플", "최근패턴",
                 "같이 잘 나온 수", "합계"
             ]
         )
@@ -605,6 +581,13 @@ class MainWindow(QMainWindow):
         lay.addWidget(export)
         return p
 
+    def show_recommend_category(self, category: str) -> None:
+        self.stack.setCurrentIndex(1)
+        index = self.rec_category.findText(category)
+        if index >= 0:
+            self.rec_category.setCurrentIndex(index)
+        else:
+            self.generate_recommendations()
 
     def open_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -628,7 +611,8 @@ class MainWindow(QMainWindow):
                 "번호·페어·트리플 분석 완료"
             )
             self.refresh_stats_table()
-            self.statusBar().showMessage("Excel 분석 완료")
+            self.statusBar().showMessage("Excel 분석 완료 — 사진 또는 번호를 입력하세요.")
+            self.stack.setCurrentIndex(0)
         except Exception as e:
             self.progress.setValue(0)
             QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
@@ -787,6 +771,8 @@ class MainWindow(QMainWindow):
                 f"고유 번호 {len(counts)}개 / 전체 입력 {sum(counts.values())}개\n" +
                 " · ".join(f"{n}번 {c}회" for n, c in ranked)
             )
+            if self.analyzer.draws and len(counts) >= 6:
+                self.generate_recommendations()
         except Exception as e:
             QMessageBox.warning(self, "번호 입력 오류", str(e))
 
@@ -819,10 +805,10 @@ class MainWindow(QMainWindow):
             category = self.rec_category.currentText()
             self.recommendations = recommender.generate(
                 weights,
-                self.rec_count.value(),
-                self.sum_min.value(),
-                self.sum_max.value(),
-                self.allow_consecutive.isChecked(),
+                100,
+                20,
+                300,
+                True,
                 category,
             )
             if not self.recommendations:
@@ -888,7 +874,7 @@ class MainWindow(QMainWindow):
 
     def export_results(self) -> None:
         if not self.recommendations:
-            QMessageBox.information(self, "저장할 결과 없음", "먼저 추천 조합을 생성하세요.")
+            QMessageBox.information(self, "저장할 결과 없음", "먼저 추천조합을 생성하세요.")
             return
         category = self.rec_category.currentText()
         path, _ = QFileDialog.getSaveFileName(
