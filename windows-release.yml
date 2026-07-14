@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release 버전 (예: v0.2.0)"
+        description: "Release 버전"
         required: true
-        default: "v0.3.1"
+        default: "v1.0.0"
   push:
     branches: [main]
     paths:
@@ -20,19 +20,36 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: 저장소 파일 받기
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: 라이브러리 설치
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: EXE 생성
+
+      - name: OCR 패키지 위치 확인
+        id: rapidocr
         shell: pwsh
         run: |
+          $pkg = python -c "import rapidocr_onnxruntime, pathlib; print(pathlib.Path(rapidocr_onnxruntime.__file__).resolve().parent)"
+          "pkg=$pkg" >> $env:GITHUB_OUTPUT
+          Write-Host "RapidOCR package: $pkg"
+          Get-ChildItem -Recurse $pkg | Select-Object FullName
+
+      - name: Windows EXE 생성
+        shell: pwsh
+        run: |
+          $rapid = "${{ steps.rapidocr.outputs.pkg }}"
           pyinstaller `
             --noconfirm `
             --clean `
@@ -41,17 +58,28 @@ jobs:
             --name "TaegyeongLottoLab" `
             --collect-all PySide6 `
             --collect-all pandas `
-            --hidden-import openpyxl `
-            --collect-all rapidocr_onnxruntime `
             --collect-all onnxruntime `
             --collect-all cv2 `
+            --hidden-import openpyxl `
+            --add-data "$rapid;rapidocr_onnxruntime" `
             app.py
-      - uses: actions/upload-artifact@v4
+
+      - name: EXE 결과 확인
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/TaegyeongLottoLab.exe")) {
+            throw "EXE 생성 실패"
+          }
+          Get-Item "dist/TaegyeongLottoLab.exe" | Format-List Name,Length,FullName
+
+      - name: EXE 다운로드 파일 등록
+        uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows-v0.3.1
+          name: TaegyeongLottoLab-Windows-v1.0
           path: dist/TaegyeongLottoLab.exe
           if-no-files-found: error
           retention-days: 30
+
       - name: 수동 실행 시 Release 등록
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
@@ -65,5 +93,5 @@ jobs:
           } else {
             gh release create "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" `
               --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
-              --notes "Excel 분석, 번호 입력, 통계, 추천 조합 및 조합 검사 기능 추가."
+              --notes "v1.0: Excel 분석, 사진 OCR, 번호 집계, 추천 조합, 1등·2등 제외, 조합 검사."
           }

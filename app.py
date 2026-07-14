@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "0.3.1"
+VERSION = "1.0.0"
 
 
 @dataclass(frozen=True)
@@ -539,7 +539,14 @@ class MainWindow(QMainWindow):
         if self.ocr_engine is None:
             self.statusBar().showMessage("OCR 엔진을 처음 준비하는 중입니다...")
             QApplication.processEvents()
-            self.ocr_engine = RapidOCR()
+            try:
+                self.ocr_engine = RapidOCR()
+            except Exception as exc:
+                raise RuntimeError(
+                    "OCR 엔진 초기화에 실패했습니다. "
+                    "EXE에 OCR 모델·설정 파일이 포함되지 않았을 수 있습니다.\n"
+                    f"상세 오류: {exc}"
+                ) from exc
         return self.ocr_engine
 
     @staticmethod
@@ -552,6 +559,7 @@ class MainWindow(QMainWindow):
             if re.search(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", text):
                 text = re.sub(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", " ", text)
             text = re.sub(r"\b\d+\s*/\s*\d+\b", " ", text)
+            text = re.sub(r"\b(96|100)\b", " ", text)  # 배터리 표시 오인식 방지
 
             for token in re.findall(r"(?<!\d)\d{1,2}(?!\d)", text):
                 value = int(token)
