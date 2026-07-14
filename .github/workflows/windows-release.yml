@@ -1,0 +1,74 @@
+name: Windows EXE 자동 빌드 및 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release 버전 (예: v0.1.0)"
+        required: true
+        default: "v0.1.0"
+  push:
+    branches:
+      - main
+    paths:
+      - "app.py"
+      - "requirements.txt"
+      - ".github/workflows/windows-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: 저장소 파일 받기
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: 라이브러리 설치
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Windows EXE 만들기
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onefile `
+            --name "TaegyeongLottoLab" `
+            app.py
+
+      - name: EXE 빌드 결과 보관
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaegyeongLottoLab-Windows
+          path: dist/TaegyeongLottoLab.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 수동 실행 시 GitHub Release 생성
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release view "$env:RELEASE_VERSION" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" --clobber
+          } else {
+            gh release create "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" `
+              --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
+              --notes "Windows 실행파일 자동 빌드 버전입니다."
+          }
