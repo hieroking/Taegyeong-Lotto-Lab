@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "3.4.2"
+VERSION = "3.4.3"
 
 
 
@@ -644,6 +644,18 @@ class MainWindow(QMainWindow):
         title.setObjectName("pageTitle")
         lay.addWidget(title)
 
+        self.excel_status = QLabel(
+            "역대 Excel이 아직 등록되지 않았습니다. 왼쪽 아래 '역대 Excel 불러오기'를 누르세요."
+        )
+        self.excel_status.setObjectName("card")
+        self.excel_status.setWordWrap(True)
+        lay.addWidget(self.excel_status)
+
+        self.excel_progress = QProgressBar()
+        self.excel_progress.setRange(0, 100)
+        self.excel_progress.setValue(0)
+        lay.addWidget(self.excel_progress)
+
         grid = QGridLayout()
         left = QFrame()
         left.setObjectName("card")
@@ -765,31 +777,57 @@ class MainWindow(QMainWindow):
 
     def open_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "역대 로또 당첨번호 Excel 선택", "",
-            "Excel (*.xlsx *.xls)"
+            self,
+            "역대 로또 당첨번호 Excel 선택",
+            "",
+            "Excel (*.xlsx *.xls)",
         )
         if not path:
             return
+
         try:
-            self.progress.setValue(15)
+            self.excel_progress.setValue(10)
+            self.excel_status.setText(f"Excel 읽는 중: {Path(path).name}")
+            self.statusBar().showMessage("역대 Excel을 읽고 있습니다...")
             QApplication.processEvents()
+
             self.analyzer.load_excel(path)
-            self.progress.setValue(100)
+
+            self.excel_progress.setValue(75)
             latest = self.analyzer.draws[-1].round_no
-            self.dashboard_info.setText(
-                f"파일: {Path(path).name}\n"
-                f"분석 회차: {len(self.analyzer.draws):,}회\n"
-                f"최신 회차: {latest}회\n"
-                f"1등 조합: {len(self.analyzer.first_prize):,}개\n"
-                f"2등 성립 조합: {len(self.analyzer.second_prize):,}개\n\n"
-                "번호·페어·트리플 분석 완료"
+            QApplication.processEvents()
+
+            self.excel_status.setText(
+                f"Excel 등록 완료: {Path(path).name}\n"
+                f"분석 회차 {len(self.analyzer.draws):,}개 · 최신 {latest}회 · "
+                f"1등 조합 {len(self.analyzer.first_prize):,}개"
             )
-            self.refresh_stats_table()
-            self.statusBar().showMessage("Excel 분석 완료 — 자체추천 계산을 시작합니다.")
+            self.excel_progress.setValue(100)
+
+            # Excel만으로 계산 가능한 자체추천을 즉시 실행
+            self.statusBar().showMessage("Excel 분석 완료 — 자체추천 계산 중...")
             self.show_recommend_category("자체추천")
-        except Exception as e:
-            self.progress.setValue(0)
-            QMessageBox.critical(self, "불러오기 오류", f"{e}\n\n{traceback.format_exc(limit=2)}")
+
+            # 사진/직접입력 번호가 이미 있다면 다른 5개 항목도 사용할 수 있음을 표시
+            try:
+                counts = self.source_weights()
+            except Exception:
+                counts = Counter()
+
+            if len(counts) >= 6:
+                self.rec_status.setText(
+                    "Excel과 입력번호가 모두 준비되었습니다. "
+                    "왼쪽 항목을 누르면 각 기준 100조합이 계산됩니다."
+                )
+
+        except Exception as exc:
+            self.excel_progress.setValue(0)
+            self.excel_status.setText("Excel 등록 실패")
+            QMessageBox.critical(
+                self,
+                "불러오기 오류",
+                f"{exc}\n\n{traceback.format_exc(limit=3)}",
+            )
 
     def run_windows_ocr(self, image_path: str) -> list[int]:
         """외부 파일 없이 Windows 10/11 내장 OCR을 호출합니다."""
@@ -946,8 +984,17 @@ class MainWindow(QMainWindow):
                 " · ".join(f"{n}번 {c}회" for n, c in ranked)
             )
             if self.analyzer.draws and len(counts) >= 6:
+                self.excel_status.setText(
+                    self.excel_status.text()
+                    + "\n입력번호 준비 완료 — 모든 추천 항목을 사용할 수 있습니다."
+                )
                 # 사진 또는 직접 입력이 들어오면 자동으로 추천조합 화면으로 이동해 계산
                 self.show_recommend_category("추천조합")
+            elif not self.analyzer.draws:
+                self.source_summary.setText(
+                    self.source_summary.text()
+                    + "\n역대 Excel을 불러오면 추천 계산이 시작됩니다."
+                )
         except Exception as e:
             QMessageBox.warning(self, "번호 입력 오류", str(e))
 
@@ -973,6 +1020,13 @@ class MainWindow(QMainWindow):
 
     def generate_recommendations(self, *_args) -> None:
         if not self.analyzer.draws:
+            if hasattr(self, "rec_table"):
+                self.rec_table.setRowCount(0)
+            if hasattr(self, "rec_status"):
+                self.rec_status.setText(
+                    "먼저 왼쪽 아래의 '역대 Excel 불러오기'로 당첨번호 파일을 등록하세요."
+                )
+            self.statusBar().showMessage("역대 Excel이 필요합니다.")
             return
         try:
             recommender = Recommender(self.analyzer)
