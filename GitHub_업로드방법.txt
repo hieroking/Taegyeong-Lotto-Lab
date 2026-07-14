@@ -1,0 +1,18 @@
+﻿太炅 Lotto Lab — GitHub 자동 EXE 제작
+
+1. ZIP 파일을 압축 풉니다.
+2. GitHub 저장소 https://github.com/hieroking/Taegyeong-Lotto-Lab 를 엽니다.
+3. Add file → Upload files를 누릅니다.
+4. 압축을 푼 폴더 안의 app.py, requirements.txt, .github 폴더를 저장소에 올립니다.
+5. Commit changes를 누릅니다.
+6. Actions 탭에서 'Windows EXE 자동 빌드 및 Release'를 누릅니다.
+7. 자동 빌드가 끝나면 실행 결과 아래 Artifacts에서
+   TaegyeongLottoLab-Windows를 다운로드합니다.
+8. Release에 올리려면 Run workflow를 누르고 버전(예: v0.1.0)을 입력합니다.
+
+권한 오류가 나면:
+Settings → Actions → General → Workflow permissions
+→ Read and write permissions → Save
+
+이 방식은 PC에 Python을 설치하지 않아도 됩니다.
+GitHub의 Windows 서버가 TaegyeongLottoLab.exe를 만듭니다.
