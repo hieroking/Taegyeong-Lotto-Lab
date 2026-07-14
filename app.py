@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 @dataclass(frozen=True)
