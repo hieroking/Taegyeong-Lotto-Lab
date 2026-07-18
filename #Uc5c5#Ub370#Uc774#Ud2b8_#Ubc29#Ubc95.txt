@@ -1,0 +1,24 @@
+﻿太炅 Lotto Lab v0.2 업데이트 방법
+
+1. ZIP 압축을 풉니다.
+2. GitHub 저장소의 Code 화면으로 이동합니다.
+3. 기존 app.py와 requirements.txt를 새 파일로 덮어씁니다.
+4. .github/workflows/windows-release.yml도 같은 경로에 덮어씁니다.
+5. Commit changes를 누릅니다.
+6. Actions에서 자동 빌드가 끝날 때까지 기다립니다.
+7. Artifacts의 TaegyeongLottoLab-Windows-v0.2를 다운로드합니다.
+8. 압축을 풀고 TaegyeongLottoLab.exe를 실행합니다.
+
+새 기능
+- 역대 로또 Excel 불러오기
+- 번호 빈도, 페어, 트리플 분석
+- 사진 파일 등록
+- 번호 직접 입력 및 반복횟수 집계
+- 역대 1등·2등 동일 조합 제외 추천
+- 직접 만든 조합 검사
+- 추천 결과 Excel 저장
+
+주의
+- 사진 파일 등록은 현재 사진 보관 기능입니다.
+- 사진 속 번호 자동 인식(OCR)은 다음 버전에서 추가합니다.
+- 분석 점수는 과거 통계 기반 순위 점수이며 당첨 확률을 의미하지 않습니다.

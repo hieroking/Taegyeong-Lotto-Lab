@@ -1,2 +1,28 @@
-# Taegyeong-Lotto-Lab
-복권연구소
+# 太炅 Lotto Lab Ultimate v11.2
+
+GitHub 최신 프로젝트를 기준으로 v27 후보생성 엔진과 v40 Elite Survival 조합 엔진을 통합한 PC 버전입니다.
+
+## 적용 구조
+
+- 자체추천: v27 페어다양성100 후보번호 생성 → v40 Elite Survival 최종 조합 선별
+- 나온횟수 / 동반수 / 트리플 / 최근패턴 / 기타 추천: 기존 항목별 계산과 점수 유지 → v40 최종 조합 선별
+- 과거 1등·2등 동일 조합 제외
+- 원래 통계 수치(출현횟수, 페어, 트리플)는 변경하지 않음
+
+## 실행
+
+1. Python 3.12 또는 3.13 설치
+2. `pip install -r requirements.txt`
+3. `python app.py`
+
+GitHub Actions에서 Windows EXE를 만들려면 Actions의 Windows release workflow를 실행하십시오.
+
+## 데이터
+
+`Data/로또_당첨번호_1회_1232회.xlsx`가 포함되어 있습니다. 프로그램에서 최신 역대번호 Excel을 직접 불러올 수도 있습니다.
+
+## 문서
+
+`Documents` 폴더에 프로젝트 백서, 대화·결정사항 요약, 엔진 라우팅 검증보고서와 무결성 자료가 들어 있습니다.
+
+> 로또 추첨은 무작위입니다. 분석 결과는 당첨을 보장하지 않습니다.

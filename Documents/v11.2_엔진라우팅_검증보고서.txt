@@ -1,0 +1,14 @@
+太炅 Lotto Lab PC v11.2 엔진 라우팅 검증보고서
+
+검증 완료 항목
+[통과] Python 문법 컴파일(py_compile)
+[통과] 자체추천 호출이 generate_self_v27_v40(100)으로 연결
+[통과] 자체추천 메타정보에 candidate_engine=v27, combination_engine=v40 기록
+[통과] 일반 추천 항목은 최대 1000개 후보조합 생성 후 Recommender.select_diverse(..., 100) 적용
+[통과] v40 선별 결과에 combination_engine='v40 Elite Survival' 기록
+[통과] 나온횟수·동반수·트리플·최근패턴 계산부는 변경하지 않음
+
+제한 사항
+- 현재 검증 환경에는 PySide6가 설치되어 있지 않아 실제 GUI 창 실행 검증은 수행하지 못함.
+- 대신 소스 문법, 함수 연결, 엔진 라우팅과 메타정보를 정적 검증함.
+- Windows 실행환경에서 PySide6/기존 패키지가 설치된 상태의 최종 GUI 실행 확인이 필요함.

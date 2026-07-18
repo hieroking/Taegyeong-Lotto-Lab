@@ -1,0 +1,6 @@
+c72b5bafae345f0271b2ba3aa7a1f1205cd3f884718371c3a25b01d65a82bad2  ./Data/로또_당첨번호_1회_1232회.xlsx
+14e0f70c10daa7bac5d98eb266e7be2229b10b2ae7c750b17b3ecfc45a4a30d6  ./README_업데이트방법.txt
+5f14c73deccf0f7f4425d9d534a6edbd3bb7c7e58655b665d70786ed74d810da  ./Windows/app.py
+75d499d849233382b82f992d9ccffb733c46b8120f5f668656b0ae2e5af56eb3  ./v11.2_엔진라우팅_검증보고서.txt
+3162a9c24a37993ce956657f663858f4f926dc6238ede15bc8509d94cf97ec91  ./太炅_Lotto_Lab_대화_결정사항_요약_v11.2.txt
+f17bad4b198ef49ae7d824b5c7e950f07edbd3cd41491fbcbc306507e9ccd06b  ./太炅_Lotto_Lab_프로젝트_백서_v11.2.txt
