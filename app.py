@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QFont, QColor, QBrush, QImage
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
@@ -44,11 +44,33 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-VERSION = "11.2.0-v27-v40-engine-routing"
+VERSION = "11.2.1-v27-v40-ocr-thread-fix"
 
 
 
 WINDOWS_OCR_PS = '$ErrorActionPreference = "Stop"\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\nfunction Await($AsyncOperation, [Type]$ResultType) {\n    $methods = [System.WindowsRuntimeSystemExtensions].GetMethods() |\n        Where-Object {\n            $_.Name -eq "AsTask" -and\n            $_.IsGenericMethod -and\n            $_.GetParameters().Count -eq 1\n        }\n    $method = $methods | Select-Object -First 1\n    if ($null -eq $method) {\n        throw "Windows Runtime AsTask 메서드를 찾지 못했습니다."\n    }\n    $generic = $method.MakeGenericMethod($ResultType)\n    $task = $generic.Invoke($null, @($AsyncOperation))\n    $task.Wait()\n    return $task.Result\n}\n\ntry {\n    Add-Type -AssemblyName System.Runtime.WindowsRuntime\n\n    $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]\n    $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]\n    $null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]\n\n    $imagePath = $env:LOTTO_OCR_IMAGE\n    if ([string]::IsNullOrWhiteSpace($imagePath)) {\n        throw "사진 경로가 전달되지 않았습니다."\n    }\n    if (!(Test-Path -LiteralPath $imagePath)) {\n        throw "사진 파일을 찾을 수 없습니다: $imagePath"\n    }\n\n    $fullPath = [System.IO.Path]::GetFullPath($imagePath)\n    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($fullPath)) ([Windows.Storage.StorageFile])\n    $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\n    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\n    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\n\n    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()\n    if ($null -eq $engine) {\n        throw "Windows OCR 엔진을 만들 수 없습니다. Windows 설정에서 한국어 OCR 언어 기능을 설치하세요."\n    }\n\n    $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])\n    $text = $result.Text\n\n    # 휴대폰 캡처에서 자주 섞이는 시간/날짜/페이지 표시 제거\n    $clean = [regex]::Replace($text, \'\\b\\d{1,2}:\\d{2}\\b\', \' \')\n    $clean = [regex]::Replace($clean, \'\\b\\d{4}[./-]\\d{1,2}[./-]\\d{1,2}\\b\', \' \')\n    $clean = [regex]::Replace($clean, \'\\b\\d+\\s*/\\s*\\d+\\b\', \' \')\n\n    $numbers = @()\n    foreach ($m in [regex]::Matches($clean, \'(?<!\\d)\\d{1,2}(?!\\d)\')) {\n        $n = [int]$m.Value\n        if ($n -ge 1 -and $n -le 45) {\n            $numbers += $n\n        }\n    }\n\n    @{ ok = $true; text = $text; numbers = $numbers } |\n        ConvertTo-Json -Compress -Depth 4\n    exit 0\n}\ncatch {\n    @{ ok = $false; error = $_.Exception.Message; numbers = @() } |\n        ConvertTo-Json -Compress -Depth 4\n    exit 1\n}'
+
+
+class OCRWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(list, list)
+
+    def __init__(self, paths: list[str], ocr_callable, parent=None) -> None:
+        super().__init__(parent)
+        self.paths = list(paths)
+        self.ocr_callable = ocr_callable
+
+    def run(self) -> None:
+        all_numbers: list[int] = []
+        failures: list[str] = []
+        total = len(self.paths)
+        for index, path in enumerate(self.paths, 1):
+            self.progress.emit(index, total, Path(path).name)
+            try:
+                all_numbers.extend(self.ocr_callable(path))
+            except Exception as exc:
+                failures.append(f"{Path(path).name}: {exc}")
+        self.completed.emit(all_numbers, failures)
 
 
 @dataclass(frozen=True)
@@ -2401,6 +2423,7 @@ class MainWindow(QMainWindow):
         self.ocr_cache: dict[tuple[str, int, int], list[int]] = {}
         self.pattern_cache: dict[str, object] = {}
         self.suspend_auto_recommend = False
+        self.ocr_worker: OCRWorker | None = None
 
         self.setWindowTitle(f"{APP_NAME} v{VERSION}")
         self.resize(1320, 850)
@@ -2545,16 +2568,16 @@ class MainWindow(QMainWindow):
         self.photo_list = QListWidget()
         ll.addWidget(self.photo_list)
         row = QHBoxLayout()
-        add = QPushButton("사진 추가·자동 인식")
-        add.clicked.connect(self.add_photos)
-        delete = QPushButton("선택 삭제")
-        delete.clicked.connect(self.delete_photo)
-        rerun = QPushButton("선택 사진 다시 인식")
-        rerun.clicked.connect(self.rerun_selected_photo_ocr)
-        row.addWidget(add)
-        row.addWidget(delete)
+        self.photo_add_button = QPushButton("사진 추가·자동 인식")
+        self.photo_add_button.clicked.connect(self.add_photos)
+        self.photo_delete_button = QPushButton("선택 삭제")
+        self.photo_delete_button.clicked.connect(self.delete_photo)
+        self.photo_rerun_button = QPushButton("선택 사진 다시 인식")
+        self.photo_rerun_button.clicked.connect(self.rerun_selected_photo_ocr)
+        row.addWidget(self.photo_add_button)
+        row.addWidget(self.photo_delete_button)
         ll.addLayout(row)
-        ll.addWidget(rerun)
+        ll.addWidget(self.photo_rerun_button)
 
         right = QFrame()
         right.setObjectName("card")
@@ -3169,6 +3192,51 @@ class MainWindow(QMainWindow):
         self.source_input.blockSignals(False)
         self.update_source_counts()
 
+    def set_ocr_controls_enabled(self, enabled: bool) -> None:
+        self.photo_add_button.setEnabled(enabled)
+        self.photo_delete_button.setEnabled(enabled)
+        self.photo_rerun_button.setEnabled(enabled)
+
+    def start_ocr(self, paths: list[str]) -> None:
+        if self.ocr_worker is not None and self.ocr_worker.isRunning():
+            QMessageBox.information(self, "OCR 진행 중", "현재 사진을 인식하고 있습니다. 완료 후 다시 시도하세요.")
+            return
+
+        self.suspend_auto_recommend = True
+        self.set_ocr_controls_enabled(False)
+        self.statusBar().showMessage(f"사진 OCR 준비 중 — 총 {len(paths)}장")
+
+        self.ocr_worker = OCRWorker(paths, self.run_windows_ocr, self)
+        self.ocr_worker.progress.connect(self.on_ocr_progress)
+        self.ocr_worker.completed.connect(self.on_ocr_completed)
+        self.ocr_worker.finished.connect(self.on_ocr_finished)
+        self.ocr_worker.start()
+
+    def on_ocr_progress(self, index: int, total: int, filename: str) -> None:
+        self.statusBar().showMessage(f"사진 인식 중 {index}/{total}: {filename}")
+
+    def on_ocr_completed(self, all_numbers: list, failures: list) -> None:
+        if all_numbers:
+            self.append_ocr_numbers([int(n) for n in all_numbers])
+            self.statusBar().showMessage(
+                f"사진 처리 완료 — 숫자 {len(all_numbers)}개 인식, 추천조합 계산 완료"
+            )
+        else:
+            self.statusBar().showMessage("사진에서 1~45 숫자를 찾지 못했습니다.")
+
+        message = f"인식된 숫자: {len(all_numbers)}개"
+        if failures:
+            message += "\n\n일부 오류:\n" + "\n".join(str(x) for x in failures[:5])
+        QMessageBox.information(self, "사진 OCR 결과", message)
+
+    def on_ocr_finished(self) -> None:
+        self.suspend_auto_recommend = False
+        self.set_ocr_controls_enabled(True)
+        worker = self.ocr_worker
+        self.ocr_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
     def add_photos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "번호 사진 선택", "",
@@ -3177,63 +3245,19 @@ class MainWindow(QMainWindow):
         if not paths:
             return
 
-        all_numbers: list[int] = []
-        failures: list[str] = []
-        self.suspend_auto_recommend = True
-
         for path in paths:
             if path not in self.photo_paths:
                 self.photo_paths.append(path)
                 self.photo_list.addItem(Path(path).name)
 
-            try:
-                self.statusBar().showMessage(f"내장 OCR 인식 중: {Path(path).name}")
-                QApplication.processEvents()
-                all_numbers.extend(self.run_windows_ocr(path))
-            except Exception as exc:
-                failures.append(f"{Path(path).name}: {exc}")
-
-        self.suspend_auto_recommend = False
-        if all_numbers:
-            self.append_ocr_numbers(all_numbers)
-            self.statusBar().showMessage(
-                f"사진 {len(paths)}장 처리 완료 — 숫자 {len(all_numbers)}개 인식, 추천조합 계산 완료"
-            )
-        else:
-            self.statusBar().showMessage("사진에서 1~45 숫자를 찾지 못했습니다.")
-
-        message = (
-            f"사진 {len(paths)}장 처리 완료\n"
-            f"인식된 숫자: {len(all_numbers)}개"
-        )
-        if failures:
-            message += "\n\n일부 오류:\n" + "\n".join(failures[:5])
-        QMessageBox.information(self, "사진 OCR 결과", message)
+        self.start_ocr(paths)
 
     def rerun_selected_photo_ocr(self) -> None:
         row = self.photo_list.currentRow()
         if row < 0:
             QMessageBox.information(self, "사진 선택", "다시 인식할 사진을 선택하세요.")
             return
-
-        path = self.photo_paths[row]
-        try:
-            numbers = self.run_windows_ocr(path)
-            if numbers:
-                self.append_ocr_numbers(numbers)
-                QMessageBox.information(
-                    self,
-                    "OCR 완료",
-                    f"{Path(path).name}\n숫자 {len(numbers)}개를 입력란에 추가했습니다."
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "OCR 결과",
-                    "사진에서 1~45 숫자를 찾지 못했습니다."
-                )
-        except Exception as exc:
-            QMessageBox.warning(self, "OCR 오류", str(exc))
+        self.start_ocr([self.photo_paths[row]])
 
     def delete_photo(self) -> None:
         row = self.photo_list.currentRow()

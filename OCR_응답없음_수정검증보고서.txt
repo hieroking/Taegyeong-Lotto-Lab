@@ -1,0 +1,24 @@
+太炅 Lotto Lab v11.2.1 OCR 응답 없음 수정 검증보고서
+
+문제
+- 사진 추가 후 Windows OCR을 메인 GUI 스레드에서 subprocess.run으로 동기 실행함.
+- OCR 처리 동안 Qt 이벤트 루프가 정지해 Windows가 '응답 없음'으로 표시함.
+- QApplication.processEvents()는 OCR 실행 직전에 한 번만 호출되어 근본 해결이 되지 않음.
+
+수정
+1. OCRWorker(QThread) 추가
+2. Windows OCR 및 이미지 축소 처리를 백그라운드 스레드에서 실행
+3. 진행 상태를 사진 인식 중 n/전체로 표시
+4. 처리 중 사진 추가/삭제/재인식 버튼 잠금
+5. 중복 OCR 실행 차단
+6. OCR 완료 후 한 번만 입력번호 반영 및 추천 계산
+7. 기존 v27 후보 생성 + v40 조합 엔진은 변경하지 않음
+
+검증
+- Python 문법 컴파일: 통과
+- OCR 호출이 MainWindow.add_photos에서 직접 실행되지 않고 OCRWorker에서 실행되는 구조 확인
+- 완료/오류 신호가 GUI 스레드로 전달되는 구조 확인
+
+제한
+- 이 환경은 Windows OCR 및 PySide6 GUI를 실제로 실행할 수 없어 Windows 실기기 OCR 완료까지는 검증하지 못함.
+- Windows PC에서 사진 1장과 여러 장을 각각 시험해야 최종 실사용 검증이 완료됨.
