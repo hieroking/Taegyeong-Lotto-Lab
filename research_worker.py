@@ -238,12 +238,13 @@ def main():
     count=int(cfg["count"])
     candidate_size=int(cfg["candidate_size"])
     output_path=Path(cfg["output_path"])
+    cycle=int(cfg.get("cycle",1))
 
     summaries=[]
     details={}
     engines=["baseline","survivor","consensus"]
     total_engines=len(engines)
-    emit("progress",percent=2,message="자동연구 별도 프로세스 정상 시작")
+    emit("progress",percent=2,message=f"연속 자동연구 {cycle}회차 작업 프로세스 정상 시작")
 
     for engine_index,engine in enumerate(engines):
         emit("progress",percent=max(2,int(engine_index/total_engines*100)),message=f"{engine} 엔진 준비 중")

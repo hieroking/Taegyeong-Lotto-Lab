@@ -9,7 +9,7 @@ from typing import Iterable
 
 import pandas as pd
 from openpyxl import Workbook
-from PySide6.QtCore import Qt, QProcess, QTimer, Signal
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer, Signal
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "太炅 Lotto Lab Ultimate"
-APP_VERSION = "30.0 GitHub Windows EXE Build"
+APP_VERSION = "31.0 Continuous Auto Research Build"
 PRICE_PER_LINE = 1000
 PAYOUT = {6: 1_500_000_000, "5b": 50_000_000, 5: 1_300_000, 4: 5_000, 3: 1_000}
 
@@ -380,6 +380,10 @@ class AutoResearchPage(QWidget):
         self.process=None
         self.job_dir=None
         self.last_progress_time=0.0
+        self.continuous_running=False
+        self.stop_requested=False
+        self.current_cycle=0
+        self.total_cycles=1
 
         l=QVBoxLayout(self)
         t=QLabel("자동연구·검증센터"); t.setObjectName("pageTitle"); l.addWidget(t)
@@ -392,12 +396,26 @@ class AutoResearchPage(QWidget):
         f.addRow("검증 종료",self.end)
         f.addRow("회차당 조합",self.count)
         f.addRow("후보 번호 수",self.candidate)
+
+        self.continuous=QCheckBox("엔진 자동교체 후 다음 자동연구 계속 실행")
+        self.cycles=QSpinBox(); self.cycles.setRange(1,10000); self.cycles.setValue(10)
+        self.interval=QSpinBox(); self.interval.setRange(0,3600); self.interval.setValue(5)
+        f.addRow("연속 자동연구",self.continuous)
+        f.addRow("최대 반복 횟수",self.cycles)
+        f.addRow("반복 대기(초)",self.interval)
         l.addLayout(f)
 
+        buttons=QHBoxLayout()
         self.button=QPushButton("실제 자동연구 시작")
         self.button.setObjectName("primaryButton")
-        self.button.clicked.connect(self.run_research)
-        l.addWidget(self.button)
+        self.button.clicked.connect(self.start_research)
+        buttons.addWidget(self.button)
+
+        self.stop_button=QPushButton("연속 자동연구 중지")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_research)
+        buttons.addWidget(self.stop_button)
+        l.addLayout(buttons)
 
         self.progress=QProgressBar()
         self.progress.setRange(0,100)
@@ -428,16 +446,45 @@ class AutoResearchPage(QWidget):
         self.start.setValue(max(1, latest-10))
         self.status.setText(f"{len(rows)}회 데이터 연결됨 · 최신 {latest}회")
 
-    def run_research(self):
+    def start_research(self):
         if not self.rows:
             QMessageBox.warning(self,"확인","먼저 엑셀을 불러오세요.")
             return
-        if self.process is not None:
+        if self.process is not None or self.continuous_running:
             QMessageBox.information(self,"진행 중","자동연구가 이미 실행 중입니다.")
             return
         if self.start.value() > self.end.value():
             QMessageBox.warning(self,"범위 오류","검증 시작 회차가 종료 회차보다 큽니다.")
             return
+
+        self.stop_requested=False
+        self.current_cycle=0
+        self.total_cycles=self.cycles.value() if self.continuous.isChecked() else 1
+        self.continuous_running=True
+        self.button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.run_cycle()
+
+    def stop_research(self):
+        self.stop_requested=True
+        self.continuous_running=False
+        self.stop_button.setEnabled(False)
+        if self.process is not None:
+            self.status.setText("중지 요청 중… 현재 연구 프로세스를 종료합니다.")
+            self.process.kill()
+        else:
+            self.status.setText("연속 자동연구가 중지되었습니다.")
+            self.button.setEnabled(True)
+
+    def run_cycle(self):
+        if self.stop_requested:
+            self.finish_continuous("사용자 요청으로 연속 자동연구를 중지했습니다.")
+            return
+        if self.current_cycle >= self.total_cycles:
+            self.finish_continuous(f"연속 자동연구 {self.total_cycles}회가 모두 완료되었습니다.")
+            return
+
+        self.current_cycle += 1
 
         available={r.round_no for r in self.rows}
         missing=[r for r in range(self.start.value(),self.end.value()+1) if r not in available]
@@ -445,11 +492,16 @@ class AutoResearchPage(QWidget):
             QMessageBox.warning(self,"데이터 확인",f"검증 구간에 없는 회차가 있습니다.\n첫 누락 회차: {missing[0]}")
             return
 
-        self.button.setEnabled(False)
         self.progress.setValue(1)
         self.table.setRowCount(0)
-        self.log.clear()
-        self.status.setText("자동연구 별도 프로세스 시작 중…")
+        if self.current_cycle == 1:
+            self.log.clear()
+        self.log.appendPlainText(
+            f"\n===== 연속 자동연구 {self.current_cycle}/{self.total_cycles} 시작 ====="
+        )
+        self.status.setText(
+            f"자동연구 {self.current_cycle}/{self.total_cycles}회차 프로세스 시작 중…"
+        )
         QApplication.processEvents()
 
         self.job_dir=Path(tempfile.mkdtemp(prefix="taegyeong_research_"))
@@ -461,6 +513,7 @@ class AutoResearchPage(QWidget):
             "end":self.end.value(),
             "count":self.count.value(),
             "candidate_size":self.candidate.value(),
+            "cycle":self.current_cycle,
             "output_path":str(output_path),
         }
         input_path.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
@@ -490,6 +543,10 @@ class AutoResearchPage(QWidget):
             self.process.setArguments(["-u",str(worker_script),str(input_path)])
 
         self.process.setWorkingDirectory(str(base_dir))
+        env=QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUTF8","1")
+        env.insert("PYTHONIOENCODING","utf-8")
+        self.process.setProcessEnvironment(env)
         self.process.setProcessChannelMode(QProcess.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self.read_stdout)
         self.process.readyReadStandardError.connect(self.read_stderr)
@@ -505,7 +562,9 @@ class AutoResearchPage(QWidget):
             return
 
         self.progress.setValue(2)
-        self.status.setText("자동연구 프로세스 시작 완료 · 계산 준비 중")
+        self.status.setText(
+            f"자동연구 {self.current_cycle}/{self.total_cycles}회차 시작 완료 · 계산 준비 중"
+        )
         self.log.appendPlainText("연구 프로세스 PID: "+str(self.process.processId()))
 
     def read_stdout(self):
@@ -577,7 +636,10 @@ class AutoResearchPage(QWidget):
 
         result_path=self.job_dir/"result.json" if self.job_dir else None
         if exit_code != 0 or not result_path or not result_path.exists():
-            self.fail(f"자동연구가 완료되지 않았습니다. 종료코드: {exit_code}\n아래 로그를 확인하세요.")
+            if self.stop_requested:
+                self.finish_continuous("사용자 요청으로 자동연구를 중지했습니다.")
+            else:
+                self.fail(f"자동연구가 완료되지 않았습니다. 종료코드: {exit_code}\n아래 로그를 확인하세요.")
             return
 
         try:
@@ -607,13 +669,15 @@ class AutoResearchPage(QWidget):
                 "start":self.start.value(),
                 "end":self.end.value(),
                 "count":self.count.value(),
-                "candidate_size":self.candidate.value()
+                "candidate_size":self.candidate.value(),
+                "cycle":self.current_cycle,
+                "total_cycles":self.total_cycles
             },
             "summaries":[asdict(s) for s in summaries],
             "decisions":decisions
         }
         run_hash=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:16]
-        rd=out/f"검증결과_{run_hash}"
+        rd=out/f"검증결과_주기{self.current_cycle:04d}_{run_hash}"
         rd.mkdir(exist_ok=True)
         (rd/"summary.json").write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding="utf-8")
 
@@ -638,21 +702,52 @@ class AutoResearchPage(QWidget):
 
         self.log.appendPlainText("\n".join(f"{d[0]}: {d[3]} (우세 {d[1]}개)" for d in decisions))
         self.log.appendPlainText(f"\n저장 위치:\n{rd}")
-        self.status.setText("실제 검증 완료")
-        self.progress.setValue(100)
-        self.button.setEnabled(True)
-        self.engine_results.emit(summaries)
-        QMessageBox.information(
-            self,"완료",
-            f"자동연구 검증이 완료되었습니다.\n엔진관리에서 직접 선택하거나 자동교체할 수 있습니다.\n\n{rd}"
+        self.status.setText(
+            f"자동연구 {self.current_cycle}/{self.total_cycles}회차 검증 완료"
         )
+        self.progress.setValue(100)
+
+        # 신호는 즉시 전달되므로 AI 엔진관리의 자동교체가 먼저 실행된다.
+        self.engine_results.emit(summaries)
+        self.log.appendPlainText(
+            f"연구 {self.current_cycle}회 완료 · 엔진 자동교체 판정 전달 완료"
+        )
+
+        if (
+            self.continuous.isChecked()
+            and not self.stop_requested
+            and self.current_cycle < self.total_cycles
+        ):
+            wait_ms=self.interval.value()*1000
+            self.status.setText(
+                f"{self.interval.value()}초 후 다음 자동연구 시작 "
+                f"({self.current_cycle+1}/{self.total_cycles})"
+            )
+            QTimer.singleShot(wait_ms,self.run_cycle)
+        else:
+            self.finish_continuous(
+                f"자동연구 {self.current_cycle}회 완료\n\n마지막 저장 위치:\n{rd}",
+                show_message=True
+            )
+
+    def finish_continuous(self,message,show_message=False):
+        self.continuous_running=False
+        self.process=None
+        self.button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.status.setText(message.splitlines()[0])
+        self.log.appendPlainText(message)
+        if show_message:
+            QMessageBox.information(self,"완료",message)
 
     def fail(self,msg):
         self.watchdog.stop()
         self.progress.setValue(0)
         self.log.appendPlainText(msg)
         self.status.setText("오류 발생 · 아래 로그를 확인하세요.")
+        self.continuous_running=False
         self.button.setEnabled(True)
+        self.stop_button.setEnabled(False)
         self.process=None
         QMessageBox.critical(self,"자동연구 오류",msg[-1500:])
 
