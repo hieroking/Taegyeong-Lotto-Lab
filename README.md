@@ -1,34 +1,27 @@
-# 太炅 Lotto Lab Ultimate v11.2
+# 太炅 Lotto Lab v30 — GitHub Actions Windows EXE
 
-GitHub 최신 프로젝트를 기준으로 v27 후보생성 엔진과 v40 Elite Survival 조합 엔진을 통합한 PC 버전입니다.
+이 패키지를 GitHub 저장소의 **루트**에 업로드하면 Windows에서 자동으로 EXE를 빌드합니다.
 
-## 적용 구조
+## 자동 빌드
+1. 저장소에서 **Actions**
+2. **Windows EXE Build v30**
+3. **Run workflow**
+4. 완료 후 실행 화면 아래 **Artifacts**
+5. `Taegyeong-Lotto-Lab-v30-Windows` 다운로드
 
-- 자체추천: v27 페어다양성100 후보번호 생성 → v40 Elite Survival 최종 조합 선별
-- 나온횟수 / 동반수 / 트리플 / 최근패턴 / 기타 추천: 기존 항목별 계산과 점수 유지 → v40 최종 조합 선별
-- 과거 1등·2등 동일 조합 제외
-- 원래 통계 수치(출현횟수, 페어, 트리플)는 변경하지 않음
+압축 안에는 다음 두 실행파일이 들어갑니다.
 
-## 실행
+- `Taegyeong_Lotto_Lab_v30.exe` — 사용자가 실행하는 프로그램
+- `research_worker.exe` — 자동연구 전용 엔진
 
-1. Python 3.12 또는 3.13 설치
-2. `pip install -r requirements.txt`
-3. `python app.py`
+두 파일은 반드시 같은 폴더에 두어야 합니다.
 
-GitHub Actions에서 Windows EXE를 만들려면 Actions의 Windows release workflow를 실행하십시오.
+## 검은 CMD 창
+메인 프로그램은 PyInstaller `--windowed`로 빌드됩니다.  
+자동연구 엔진은 `CREATE_NO_WINDOW`로 실행되므로 검은 CMD 창을 띄우지 않습니다.
 
-## 데이터
+## 오류 기록
+프로그램과 같은 폴더에 다음 파일이 생성됩니다.
 
-`Data/로또_당첨번호_1회_1232회.xlsx`가 포함되어 있습니다. 프로그램에서 최신 역대번호 Excel을 직접 불러올 수도 있습니다.
-
-## 문서
-
-`Documents` 폴더에 프로젝트 백서, 대화·결정사항 요약, 엔진 라우팅 검증보고서와 무결성 자료가 들어 있습니다.
-
-> 로또 추첨은 무작위입니다. 분석 결과는 당첨을 보장하지 않습니다.
-
-## v11.2.1 사진 OCR 멈춤 수정
-- 사진 OCR을 별도 QThread에서 실행하도록 변경했습니다.
-- OCR 중에도 창 이동과 화면 갱신이 가능하며 Windows의 `응답 없음` 표시를 방지합니다.
-- OCR 처리 중 중복 실행을 막고 진행 상태를 하단 상태표시줄에 표시합니다.
-- v27 후보 생성 및 v40 조합 엔진은 그대로 유지됩니다.
+- `startup.log`
+- `error.log`

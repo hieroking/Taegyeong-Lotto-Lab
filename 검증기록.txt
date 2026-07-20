@@ -1,0 +1,10 @@
+太炅 Lotto Lab v30 검증 기록
+
+- app.py / research_worker.py Python 구문 검사: 통과
+- GitHub Actions workflow 필수 단계 검사: 통과
+- Windows runner 설정: windows-latest
+- GUI 빌드: PyInstaller onefile windowed
+- 연구 엔진 빌드: 별도 research_worker.exe
+- 연구 엔진 CMD 숨김: QProcess CREATE_NO_WINDOW 적용
+- startup.log / error.log 기록 구조: 적용
+- GitHub Actions 실제 Windows 빌드는 저장소 업로드 후 확인 필요
