@@ -2,16 +2,14 @@ name: Windows EXE 자동 빌드 및 Release
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Release 버전 (예: v0.1.0)"
-        required: true
-        default: "v0.1.0"
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
       - "app.py"
+      - "research_worker.py"
       - "requirements.txt"
       - ".github/workflows/windows-release.yml"
 
@@ -21,54 +19,85 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: 저장소 파일 받기
         uses: actions/checkout@v4
 
-      - name: Python 설치
+      - name: Python 3.13 설정
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: "pip"
 
-      - name: 라이브러리 설치
+      - name: 필수 모듈 설치
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
 
-      - name: Windows EXE 만들기
+      - name: Python 구문 검사
         shell: pwsh
         run: |
-          pyinstaller `
-            --noconfirm `
-            --clean `
-            --windowed `
-            --onefile `
-            --name "TaegyeongLottoLab" `
+          python -m py_compile app.py research_worker.py
+
+      - name: 자동연구 엔진 EXE 만들기
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console `
+            --name research_worker `
+            --collect-all pandas `
+            --collect-all openpyxl `
+            research_worker.py
+
+      - name: 메인 프로그램 EXE 만들기
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name "Taegyeong_Lotto_Lab_v30" `
+            --collect-all PySide6 `
+            --collect-all pandas `
+            --collect-all openpyxl `
             app.py
 
-      - name: EXE 빌드 결과 보관
+      - name: 배포 폴더 만들기
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release\Taegyeong_Lotto_Lab_v30 | Out-Null
+          Copy-Item dist\Taegyeong_Lotto_Lab_v30.exe release\Taegyeong_Lotto_Lab_v30\
+          Copy-Item dist\research_worker.exe release\Taegyeong_Lotto_Lab_v30\
+
+          if (Test-Path "사용방법.md") {
+            Copy-Item "사용방법.md" release\Taegyeong_Lotto_Lab_v30\
+          }
+          if (Test-Path "프로젝트_백서.md") {
+            Copy-Item "프로젝트_백서.md" release\Taegyeong_Lotto_Lab_v30\
+          }
+          if (Test-Path "대화_결정사항_요약.md") {
+            Copy-Item "대화_결정사항_요약.md" release\Taegyeong_Lotto_Lab_v30\
+          }
+          if (Test-Path "검증기록.txt") {
+            Copy-Item "검증기록.txt" release\Taegyeong_Lotto_Lab_v30\
+          }
+
+          Compress-Archive `
+            -Path release\Taegyeong_Lotto_Lab_v30 `
+            -DestinationPath release\Taegyeong_Lotto_Lab_v30_Windows.zip `
+            -Force
+
+      - name: 완성 ZIP 보관
         uses: actions/upload-artifact@v4
         with:
-          name: TaegyeongLottoLab-Windows
-          path: dist/TaegyeongLottoLab.exe
+          name: Taegyeong-Lotto-Lab-v30-Windows
+          path: release/Taegyeong_Lotto_Lab_v30_Windows.zip
           if-no-files-found: error
           retention-days: 30
 
-      - name: 수동 실행 시 GitHub Release 생성
-        if: github.event_name == 'workflow_dispatch'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          gh release view "$env:RELEASE_VERSION" *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" --clobber
-          } else {
-            gh release create "$env:RELEASE_VERSION" "dist/TaegyeongLottoLab.exe" `
-              --title "太炅 Lotto Lab $env:RELEASE_VERSION" `
-              --notes "Windows 실행파일 자동 빌드 버전입니다."
-          }
+      - name: 태그 실행 시 GitHub Release 생성
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/Taegyeong_Lotto_Lab_v30_Windows.zip
+          generate_release_notes: true
