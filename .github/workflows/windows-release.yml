@@ -1,12 +1,10 @@
-name: Windows EXE 자동 빌드 및 Release
+name: Windows EXE 자동 빌드 v31
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-    tags:
-      - "v*"
     paths:
       - "app.py"
       - "research_worker.py"
@@ -22,11 +20,9 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: 저장소 파일 받기
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Python 3.13 설정
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
@@ -38,12 +34,11 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
-      - name: Python 구문 검사
+      - name: 구문 검사
         shell: pwsh
-        run: |
-          python -m py_compile app.py research_worker.py
+        run: python -m py_compile app.py research_worker.py
 
-      - name: 자동연구 엔진 EXE 만들기
+      - name: 연구 엔진 EXE
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --console `
@@ -52,52 +47,31 @@ jobs:
             --collect-all openpyxl `
             research_worker.py
 
-      - name: 메인 프로그램 EXE 만들기
+      - name: 메인 GUI EXE
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
-            --name "Taegyeong_Lotto_Lab_v30" `
+            --name Taegyeong_Lotto_Lab_v31 `
             --collect-all PySide6 `
             --collect-all pandas `
             --collect-all openpyxl `
             app.py
 
-      - name: 배포 폴더 만들기
+      - name: 배포 ZIP
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release\Taegyeong_Lotto_Lab_v30 | Out-Null
-          Copy-Item dist\Taegyeong_Lotto_Lab_v30.exe release\Taegyeong_Lotto_Lab_v30\
-          Copy-Item dist\research_worker.exe release\Taegyeong_Lotto_Lab_v30\
+          New-Item -ItemType Directory -Force -Path release\Taegyeong_Lotto_Lab_v31 | Out-Null
+          Copy-Item dist\Taegyeong_Lotto_Lab_v31.exe release\Taegyeong_Lotto_Lab_v31\
+          Copy-Item dist\research_worker.exe release\Taegyeong_Lotto_Lab_v31\
+          if (Test-Path "사용방법.md") { Copy-Item "사용방법.md" release\Taegyeong_Lotto_Lab_v31\ }
+          if (Test-Path "프로젝트_백서.md") { Copy-Item "프로젝트_백서.md" release\Taegyeong_Lotto_Lab_v31\ }
+          if (Test-Path "대화_결정사항_요약.md") { Copy-Item "대화_결정사항_요약.md" release\Taegyeong_Lotto_Lab_v31\ }
+          Compress-Archive -Path release\Taegyeong_Lotto_Lab_v31 `
+            -DestinationPath release\Taegyeong_Lotto_Lab_v31_Windows.zip -Force
 
-          if (Test-Path "사용방법.md") {
-            Copy-Item "사용방법.md" release\Taegyeong_Lotto_Lab_v30\
-          }
-          if (Test-Path "프로젝트_백서.md") {
-            Copy-Item "프로젝트_백서.md" release\Taegyeong_Lotto_Lab_v30\
-          }
-          if (Test-Path "대화_결정사항_요약.md") {
-            Copy-Item "대화_결정사항_요약.md" release\Taegyeong_Lotto_Lab_v30\
-          }
-          if (Test-Path "검증기록.txt") {
-            Copy-Item "검증기록.txt" release\Taegyeong_Lotto_Lab_v30\
-          }
-
-          Compress-Archive `
-            -Path release\Taegyeong_Lotto_Lab_v30 `
-            -DestinationPath release\Taegyeong_Lotto_Lab_v30_Windows.zip `
-            -Force
-
-      - name: 완성 ZIP 보관
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Taegyeong-Lotto-Lab-v30-Windows
-          path: release/Taegyeong_Lotto_Lab_v30_Windows.zip
+          name: Taegyeong-Lotto-Lab-v31-Windows
+          path: release/Taegyeong_Lotto_Lab_v31_Windows.zip
           if-no-files-found: error
           retention-days: 30
-
-      - name: 태그 실행 시 GitHub Release 생성
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/Taegyeong_Lotto_Lab_v30_Windows.zip
-          generate_release_notes: true
